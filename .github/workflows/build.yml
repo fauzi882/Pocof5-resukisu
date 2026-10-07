@@ -1,12 +1,160 @@
-name: Test Actions
+name: Build POCO F5 Marble ReSukiSU SUSFS
 
 on:
   workflow_dispatch:
 
 jobs:
-  test:
+  build:
+    name: Build Marble Kernel
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Test
-        run: echo "GitHub Actions berhasil jalan!"
+      - name: Checkout Kernel Source
+        uses: actions/checkout@v4
+        with:
+          repository: mohdakil2426/android_kernel_xiaomi_marble
+          ref: melt-rebase
+          fetch-depth: 1
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            bc \
+            bison \
+            build-essential \
+            ccache \
+            curl \
+            flex \
+            git \
+            libelf-dev \
+            libssl-dev \
+            python3 \
+            rsync \
+            unzip \
+            zip
+
+      - name: Show Source Information
+        run: |
+          echo "========================================"
+          echo "POCO F5 MARBLE KERNEL"
+          echo "========================================"
+
+          echo "Commit:"
+          git rev-parse HEAD
+
+          echo
+          echo "Branch:"
+          git branch --show-current
+
+          echo
+          echo "Kernel:"
+          make kernelversion || true
+
+          echo
+          echo "Defconfig:"
+          ls arch/arm64/configs/ | grep marble || true
+
+      - name: Prepare Kernel Configuration
+        run: |
+          export ARCH=arm64
+
+          mkdir -p out
+
+          make O=out marble_defconfig
+
+          echo
+          echo "Kernel configuration generated."
+          echo
+
+          grep -E \
+            "CONFIG_ARM64|CONFIG_KSU|CONFIG_KSU_SUSFS|CONFIG_LTO_CLANG" \
+            out/.config || true
+
+      - name: Install ReSukiSU
+        run: |
+          echo "Installing ReSukiSU..."
+
+          curl -LSs \
+            https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh \
+            | bash -s -- out
+
+      - name: Enable ReSukiSU Configuration
+        run: |
+          export ARCH=arm64
+
+          cd out
+
+          if grep -q "^CONFIG_KSU=" .config; then
+            sed -i 's/^CONFIG_KSU=.*/CONFIG_KSU=y/' .config
+          else
+            echo "CONFIG_KSU=y" >> .config
+          fi
+
+          if grep -q "^CONFIG_KSU_SUSFS=" .config; then
+            sed -i 's/^CONFIG_KSU_SUSFS=.*/CONFIG_KSU_SUSFS=y/' .config
+          else
+            echo "CONFIG_KSU_SUSFS=y" >> .config
+          fi
+
+          cd ..
+
+          make O=out olddefconfig
+
+          echo
+          echo "ReSukiSU configuration:"
+          grep -E \
+            "CONFIG_KSU|CONFIG_KSU_SUSFS" \
+            out/.config || true
+
+      - name: Build Kernel
+        run: |
+          export ARCH=arm64
+
+          make \
+            O=out \
+            -j$(nproc) \
+            Image.gz \
+            dtbs \
+            2>&1 | tee build.log
+
+      - name: Check Kernel Output
+        if: always()
+        run: |
+          echo "========================================"
+          echo "BUILD OUTPUT"
+          echo "========================================"
+
+          find out/arch/arm64/boot \
+            -maxdepth 2 \
+            -type f \
+            -printf '%p\n' \
+            2>/dev/null || true
+
+          echo
+          echo "Kernel config:"
+          grep -E \
+            "CONFIG_KSU|CONFIG_KSU_SUSFS" \
+            out/.config || true
+
+      - name: Upload Build Log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: marble-build-log
+          path: build.log
+          if-no-files-found: ignore
+
+      - name: Upload Kernel
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: marble-resukisu-susfs-kernel
+          path: |
+            out/arch/arm64/boot/Image
+            out/arch/arm64/boot/Image.gz
+            out/arch/arm64/boot/dts/**/*.dtb
+            out/arch/arm64/boot/dts/**/*.dtbo
+            out/.config
+          if-no-files-found: warn
