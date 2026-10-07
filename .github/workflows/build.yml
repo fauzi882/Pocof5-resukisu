@@ -524,7 +524,7 @@ jobs:
             out/.config \
             || true
 
-      # ============================================================
+            # ============================================================
       # 20. ENABLE BAKASU SUSFS
       # ============================================================
       - name: Enable BakaSU SUSFS
@@ -535,73 +535,56 @@ jobs:
           echo "ENABLE BAKASU SUSFS"
           echo "=========================================="
 
-          scripts/config \
-            --enable CONFIG_KSU
-
-          scripts/config \
-            --enable CONFIG_KSU_SUSFS
-
-          # SUS-SU is kprobe based.
-          # Keep it disabled for BakaSU SUSFS Inline Hook mode.
-          scripts/config \
-            --disable CONFIG_KSU_SUSFS_SUS_SU \
-            || true
-
-          # Enable commonly useful SUSFS features when available.
-          scripts/config \
-            --enable CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT \
-            || true
-
-          scripts/config \
-            --enable CONFIG_KSU_SUSFS_SUS_PATH \
-            || true
-
-          scripts/config \
-            --enable CONFIG_KSU_SUSFS_SUS_MOUNT \
-            || true
-
-          scripts/config \
-            --enable CONFIG_KSU_SUSFS_SUS_KSTAT \
-            || true
-
-          scripts/config \
-            --enable CONFIG_KSU_SUSFS_SPOOF_UNAME \
-            || true
-
-          scripts/config \
-            --enable CONFIG_KSU_SUSFS_ENABLE_LOG \
-            || true
-
-          scripts/config \
-            --enable CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
-            || true
-
-          scripts/config \
-            --enable CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
-            || true
-
-          scripts/config \
-            --enable CONFIG_KSU_SUSFS_OPEN_REDIRECT \
-            || true
-
-          scripts/config \
-            --enable CONFIG_KSU_SUSFS_SUS_MAP \
-            || true
-
-          make \
-            O=out \
-            ARCH=arm64 \
-            LLVM=1 \
-            LLVM_IAS=1 \
-            olddefconfig
+          CONFIG="$GITHUB_WORKSPACE/out/.config"
 
           echo ""
-          echo "Final KSU/SUSFS configuration:"
+          echo "Config:"
+          echo "$CONFIG"
+
+          test -f "$CONFIG"
+
+          echo ""
+          echo "Current KSU/SUSFS config:"
 
           grep -E \
             '^CONFIG_KSU=|^CONFIG_KSU_SUSFS=|^CONFIG_KSU_SUSFS_' \
-            out/.config \
+            "$CONFIG" \
             || true
+
+          echo ""
+          echo "Enabling CONFIG_KSU..."
+
+          "$GITHUB_WORKSPACE/scripts/config" \
+            --file "$CONFIG" \
+            --enable CONFIG_KSU
+
+          echo ""
+          echo "Enabling CONFIG_KSU_SUSFS..."
+
+          "$GITHUB_WORKSPACE/scripts/config" \
+            --file "$CONFIG" \
+            --enable CONFIG_KSU_SUSFS
+
+          echo ""
+          echo "Disabling SUS_SU..."
+
+          "$GITHUB_WORKSPACE/scripts/config" \
+            --file "$CONFIG" \
+            --disable CONFIG_KSU_SUSFS_SUS_SU \
+            || true
+
+          echo ""
+          echo "Current configuration after scripts/config:"
+
+          grep -E \
+            '^CONFIG_KSU=|^CONFIG_KSU_SUSFS=|^CONFIG_KSU_SUSFS_' \
+            "$CONFIG" \
+            || true
+
+          echo ""
+          echo "=========================================="
+          echo "BAKASU SUSFS CONFIGURATION UPDATED"
+          echo "=========================================="
 
       # ============================================================
       # 21. HARD CONFIG VALIDATION
