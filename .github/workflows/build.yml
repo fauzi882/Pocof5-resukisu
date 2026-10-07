@@ -1,18 +1,19 @@
-name: Build POCO F5 Marble ReSukiSU SUSFS
+name: Build POCO F5 Marble BakaSU
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build Marble Kernel
+    name: Build Marble Kernel with BakaSU
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout Kernel Source
+
+      - name: Checkout Marble Kernel
         uses: actions/checkout@v4
         with:
-          repository: mohdakil2426/android_kernel_xiaomi_marble
+          repository: Pzqqt/android_kernel_xiaomi_marble
           ref: melt-rebase
           fetch-depth: 1
 
@@ -25,38 +26,37 @@ jobs:
             bison \
             build-essential \
             ccache \
+            clang \
             curl \
             flex \
             git \
             libelf-dev \
             libssl-dev \
+            lld \
+            llvm \
             python3 \
             rsync \
             unzip \
             zip
 
-      - name: Show Source Information
+      - name: Show Kernel Information
         run: |
-          echo "========================================"
-          echo "POCO F5 MARBLE KERNEL"
-          echo "========================================"
+          echo "======================================"
+          echo "POCO F5 / MARBLE"
+          echo "======================================"
 
           echo "Commit:"
           git rev-parse HEAD
 
           echo
-          echo "Branch:"
-          git branch --show-current
-
-          echo
-          echo "Kernel:"
-          make kernelversion || true
+          echo "Kernel version:"
+          make kernelversion
 
           echo
           echo "Defconfig:"
-          ls arch/arm64/configs/ | grep marble || true
+          ls arch/arm64/configs/ | grep marble
 
-      - name: Prepare Kernel Configuration
+      - name: Prepare Defconfig
         run: |
           export ARCH=arm64
 
@@ -65,52 +65,121 @@ jobs:
           make O=out marble_defconfig
 
           echo
-          echo "Kernel configuration generated."
-          echo
-
+          echo "Initial configuration:"
           grep -E \
-            "CONFIG_ARM64|CONFIG_KSU|CONFIG_KSU_SUSFS|CONFIG_LTO_CLANG" \
+            "CONFIG_ARM64|CONFIG_LTO_CLANG|CONFIG_CFI" \
             out/.config || true
 
-      - name: Install ReSukiSU
+      - name: Integrate BakaSU
         run: |
-          echo "Installing ReSukiSU..."
+          echo "======================================"
+          echo "Installing BakaSU"
+          echo "======================================"
 
-          curl -LSs \
-            https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh \
-            | bash -s -- out
+          git clone \
+            --depth=1 \
+            https://github.com/Baka-SU/BakaSU.git \
+            bakasu
 
-      - name: Enable ReSukiSU Configuration
+          echo
+          echo "BakaSU repository:"
+          cd bakasu
+          git rev-parse HEAD
+
+          echo
+          echo "BakaSU directories:"
+          ls -lah
+
+          cd ..
+
+          echo
+          echo "Checking BakaSU kernel directory..."
+
+          if [ ! -d "bakasu/kernel" ]; then
+            echo "ERROR: BakaSU kernel directory not found."
+            exit 1
+          fi
+
+          echo "BakaSU kernel directory found."
+
+      - name: Integrate BakaSU Kernel
+        run: |
+          echo "======================================"
+          echo "Integrating BakaSU kernel"
+          echo "======================================"
+
+          mkdir -p KernelSU
+
+          cp -a bakasu/kernel/. KernelSU/
+
+          echo
+          echo "BakaSU kernel files:"
+          find KernelSU -maxdepth 2 -type f | head -100
+
+      - name: Connect KernelSU to Kernel Build
+        run: |
+          echo "======================================"
+          echo "Preparing KernelSU integration"
+          echo "======================================"
+
+          if [ ! -f "KernelSU/Kconfig" ]; then
+            echo "ERROR: KernelSU/Kconfig not found."
+            exit 1
+          fi
+
+          if [ ! -f "KernelSU/Makefile" ]; then
+            echo "ERROR: KernelSU/Makefile not found."
+            exit 1
+          fi
+
+          echo "KernelSU Kconfig found."
+          echo "KernelSU Makefile found."
+
+          echo
+          echo "Searching existing KernelSU references..."
+
+          grep -R \
+            "KernelSU" \
+            arch/arm64/Kconfig \
+            drivers/Kconfig \
+            drivers/Makefile \
+            2>/dev/null || true
+
+      - name: Configure BakaSU
         run: |
           export ARCH=arm64
 
-          cd out
+          echo "======================================"
+          echo "Enabling BakaSU"
+          echo "======================================"
 
-          if grep -q "^CONFIG_KSU=" .config; then
-            sed -i 's/^CONFIG_KSU=.*/CONFIG_KSU=y/' .config
+          if grep -q "^CONFIG_KSU=" out/.config; then
+            sed -i 's/^CONFIG_KSU=.*/CONFIG_KSU=y/' out/.config
           else
-            echo "CONFIG_KSU=y" >> .config
+            echo "CONFIG_KSU=y" >> out/.config
           fi
 
-          if grep -q "^CONFIG_KSU_SUSFS=" .config; then
-            sed -i 's/^CONFIG_KSU_SUSFS=.*/CONFIG_KSU_SUSFS=y/' .config
+          if grep -q "^CONFIG_KSU_MANUAL_HOOK=" out/.config; then
+            sed -i 's/^CONFIG_KSU_MANUAL_HOOK=.*/CONFIG_KSU_MANUAL_HOOK=y/' out/.config
           else
-            echo "CONFIG_KSU_SUSFS=y" >> .config
+            echo "CONFIG_KSU_MANUAL_HOOK=y" >> out/.config
           fi
-
-          cd ..
 
           make O=out olddefconfig
 
           echo
-          echo "ReSukiSU configuration:"
+          echo "BakaSU configuration:"
           grep -E \
-            "CONFIG_KSU|CONFIG_KSU_SUSFS" \
+            "^CONFIG_KSU" \
             out/.config || true
 
       - name: Build Kernel
         run: |
           export ARCH=arm64
+
+          echo "======================================"
+          echo "BUILDING KERNEL"
+          echo "======================================"
 
           make \
             O=out \
@@ -119,30 +188,31 @@ jobs:
             dtbs \
             2>&1 | tee build.log
 
-      - name: Check Kernel Output
+      - name: Verify Build
         if: always()
         run: |
-          echo "========================================"
-          echo "BUILD OUTPUT"
-          echo "========================================"
+          echo "======================================"
+          echo "BUILD RESULT"
+          echo "======================================"
 
+          echo
+          echo "Kernel files:"
           find out/arch/arm64/boot \
-            -maxdepth 2 \
+            -maxdepth 3 \
             -type f \
-            -printf '%p\n' \
             2>/dev/null || true
 
           echo
-          echo "Kernel config:"
+          echo "BakaSU configuration:"
           grep -E \
-            "CONFIG_KSU|CONFIG_KSU_SUSFS" \
+            "^CONFIG_KSU" \
             out/.config || true
 
       - name: Upload Build Log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: marble-build-log
+          name: bakasu-build-log
           path: build.log
           if-no-files-found: ignore
 
@@ -150,7 +220,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: marble-resukisu-susfs-kernel
+          name: marble-bakasu-test
           path: |
             out/arch/arm64/boot/Image
             out/arch/arm64/boot/Image.gz
