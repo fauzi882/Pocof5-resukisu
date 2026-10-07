@@ -1,82 +1,32 @@
-name: Build POCO F5 Marble
-
-on:
-  workflow_dispatch:
-
-jobs:
-  build:
-    runs-on: ubuntu-22.04
-
-    steps:
-      - name: Checkout kernel
-        uses: actions/checkout@v4
-        with:
-          repository: Pzqqt/android_kernel_xiaomi_marble
-          ref: melt-rebase
-          fetch-depth: 1
-
-      - name: Show source
-        run: |
-          echo "Kernel source:"
-          git log -1 --oneline
-          echo "Kernel version:"
-          make kernelversion
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            bc \
-            bison \
-            build-essential \
-            flex \
-            git \
-            libelf-dev \
-            libssl-dev \
-            lld \
-            llvm \
-            clang \
-            python3 \
-            rsync \
-            unzip
-
-      - name: Configure kernel
-        run: |
-          export ARCH=arm64
-          export SUBARCH=arm64
-
-          mkdir -p out
-
-          make O=out marble_defconfig
-
       - name: Build kernel
         run: |
           export ARCH=arm64
           export SUBARCH=arm64
 
-          make -j$(nproc) \
+          make -j2 \
             O=out \
             LLVM=1 \
             LLVM_IAS=1 \
             Image.gz \
-            dtbs
+            dtbs \
+            2>&1 | tee build.log
 
-      - name: Collect artifacts
+      - name: Show build error
+        if: failure()
         run: |
-          mkdir -p artifacts
+          echo "===== LAST 150 LINES ====="
+          tail -n 150 build.log
 
-          cp out/arch/arm64/boot/Image.gz artifacts/ || true
-          cp out/.config artifacts/config || true
+          echo
+          echo "===== ERRORS ====="
+          grep -iE \
+            "error:|fatal:|undefined|No such file|No rule|FAILED|Error [0-9]+" \
+            build.log \
+            | tail -n 100 || true
 
-          find out/arch/arm64/boot/dts \
-            -type f \
-            -name "*.dtb" \
-            -exec cp {} artifacts/ \; || true
-
-          ls -lah artifacts
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v5
         with:
-          name: marble-kernel
-          path: artifacts
+          name: marble-build-log
+          path: build.log
