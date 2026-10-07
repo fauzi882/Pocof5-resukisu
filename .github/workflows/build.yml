@@ -1,0 +1,133 @@
+name: Build POCO F5 Marble ReSukiSU
+
+on:
+workflow_dispatch:
+
+jobs:
+build:
+name: Build marble kernel
+runs-on: ubuntu-22.04
+
+steps:
+  - name: Checkout kernel source
+    uses: actions/checkout@v4
+    with:
+      repository: Pzqqt/android_kernel_xiaomi_marble
+      ref: melt-rebase
+      fetch-depth: 1
+
+  - name: Install build dependencies
+    run: |
+      sudo apt-get update
+      sudo apt-get install -y \
+        bc \
+        bison \
+        build-essential \
+        ccache \
+        clang \
+        flex \
+        git \
+        libelf-dev \
+        libssl-dev \
+        lld \
+        llvm \
+        python3 \
+        rsync \
+        unzip \
+        wget
+
+  - name: Show kernel information
+    run: |
+      echo "=== Kernel source ==="
+      git log -1 --oneline
+      echo
+      echo "=== Kernel version ==="
+      make kernelversion || true
+      echo
+      echo "=== Architecture ==="
+      uname -m
+
+  - name: Install ReSukiSU
+    run: |
+      echo "Installing ReSukiSU..."
+      curl -LSs \
+        "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" \
+        | bash
+
+  - name: Enable ReSukiSU
+    run: |
+      DEFCONFIG="arch/arm64/configs/marble_defconfig"
+
+      echo "Checking defconfig..."
+      test -f "$DEFCONFIG"
+
+      cat >> "$DEFCONFIG" <<'EOF'
+
+      # ReSukiSU
+      CONFIG_KSU=y
+      CONFIG_KSU_MANUAL_HOOK=y
+      EOF
+
+      echo "=== ReSukiSU configuration ==="
+      grep -E 'CONFIG_KSU' "$DEFCONFIG" || true
+
+  - name: Prepare build environment
+    run: |
+      mkdir -p out
+
+      export ARCH=arm64
+      export SUBARCH=arm64
+
+      make O=out marble_defconfig
+
+      echo "=== Final KSU configuration ==="
+      grep -E 'CONFIG_KSU' out/.config || true
+
+  - name: Build kernel
+    run: |
+      export ARCH=arm64
+      export SUBARCH=arm64
+
+      make -j"$(nproc)" \
+        O=out \
+        LLVM=1 \
+        LLVM_IAS=1 \
+        CC=clang \
+        LD=ld.lld \
+        AR=llvm-ar \
+        NM=llvm-nm \
+        OBJCOPY=llvm-objcopy \
+        OBJDUMP=llvm-objdump \
+        STRIP=llvm-strip \
+        Image.gz \
+        dtbs \
+        modules
+
+  - name: Collect build artifacts
+    run: |
+      mkdir -p artifacts
+
+      if [ -f out/arch/arm64/boot/Image.gz ]; then
+        cp out/arch/arm64/boot/Image.gz artifacts/
+      fi
+
+      if [ -f out/arch/arm64/boot/Image ]; then
+        cp out/arch/arm64/boot/Image artifacts/
+      fi
+
+      cp out/.config artifacts/marble_defconfig.final
+
+      find out/arch/arm64/boot/dts \
+        -type f \
+        -name "*.dtb" -o -name "*.dtbo" \
+        -exec cp {} artifacts/ \; 2>/dev/null || true
+
+      echo "=== Artifacts ==="
+      ls -lah artifacts
+
+  - name: Upload kernel artifacts
+    uses: actions/upload-artifact@v4
+    with:
+      name: marble-resukisu-kernel
+      path: artifacts/
+      if-no-files-found: error
