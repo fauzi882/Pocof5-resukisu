@@ -621,16 +621,19 @@ jobs:
           echo "CONFIG_KSU=y       OK"
           echo "CONFIG_KSU_SUSFS=y  OK"
 
-      # ============================================================
-      # 22. BUILD KERNEL
+            # ============================================================
+      # 22. BUILD KERNEL + CAPTURE REAL ERROR
       # ============================================================
       - name: Build kernel
         run: |
-          set -euo pipefail
+          set -uo pipefail
 
           echo "=========================================="
           echo "BUILDING POCO F5 MARBLE"
           echo "=========================================="
+
+          export KBUILD_BUILD_USER="GitHub"
+          export KBUILD_BUILD_HOST="Actions"
 
           make \
             O=out \
@@ -638,9 +641,44 @@ jobs:
             LLVM=1 \
             LLVM_IAS=1 \
             -j"$(nproc)" \
+            V=1 \
             Image.gz \
             dtbs \
             2>&1 | tee build.log
+
+          BUILD_STATUS=${PIPESTATUS[0]}
+
+          echo ""
+          echo "=========================================="
+          echo "BUILD EXIT STATUS: $BUILD_STATUS"
+          echo "=========================================="
+
+          if [ "$BUILD_STATUS" -ne 0 ]; then
+            echo ""
+            echo "=========================================="
+            echo "REAL COMPILER ERRORS"
+            echo "=========================================="
+
+            grep -nEi \
+              '(^| )error:|fatal error:|undefined reference|implicit declaration|No such file or directory|unknown type name|undeclared|Incompatible pointer|conflicting types' \
+              build.log \
+              | head -n 100 \
+              || true
+
+            echo ""
+            echo "=========================================="
+            echo "LAST 150 BUILD LOG LINES"
+            echo "=========================================="
+
+            tail -n 150 build.log
+
+            exit "$BUILD_STATUS"
+          fi
+
+          echo ""
+          echo "=========================================="
+          echo "KERNEL BUILD SUCCESS"
+          echo "=========================================="
 
       # ============================================================
       # 23. VERIFY IMAGE
