@@ -137,7 +137,7 @@ jobs:
           grep -rhoE 'config [A-Z_]+' drivers/kernelsu/Kconfig | sort -u
 
       - name: Patch SuSFS ke kernel
-        if: ${{ inputs.enable_susfs && inputs.root_solution != 'bakasu' }}
+        if: ${{ inputs.enable_susfs }}
         working-directory: kernel-source
         env:
           SUSFS_BRANCH: ${{ inputs.susfs_branch }}
