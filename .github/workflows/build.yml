@@ -12,8 +12,9 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
+
       # ============================================================
-      # 1. CHECKOUT KERNEL SOURCE
+      # 1. CHECKOUT KERNEL
       # ============================================================
       - name: Checkout Marble Kernel
         uses: actions/checkout@v4
@@ -23,10 +24,12 @@ jobs:
           fetch-depth: 1
 
       # ============================================================
-      # 2. INSTALL BUILD DEPENDENCIES
+      # 2. INSTALL DEPENDENCIES
       # ============================================================
       - name: Install dependencies
         run: |
+          set -e
+
           sudo apt-get update
 
           sudo apt-get install -y \
@@ -34,7 +37,6 @@ jobs:
             bison \
             build-essential \
             ccache \
-            clang \
             curl \
             flex \
             git \
@@ -44,7 +46,6 @@ jobs:
             llvm \
             make \
             python3 \
-            python3-pip \
             rsync \
             unzip \
             wget \
@@ -52,83 +53,90 @@ jobs:
             zip
 
       # ============================================================
-      # 3. DOWNLOAD SLIM LLVM 22.1.8
-      #
-      # Melt v5.0 menggunakan Slim LLVM 22.1.8.
-      # Kita sengaja tidak memakai GCC host sebagai compiler kernel.
+      # 3. INSTALL LLVM 22.1.8
       # ============================================================
-      - name: Install Slim LLVM 22.1.8
+      - name: Install LLVM 22.1.8
         run: |
           set -e
 
-          mkdir -p "$HOME/toolchains"
+          TOOLCHAIN_DIR="$HOME/toolchains"
 
-          cd "$HOME/toolchains"
+          mkdir -p "$TOOLCHAIN_DIR"
+
+          cd "$TOOLCHAIN_DIR"
+
+          echo "Downloading LLVM 22.1.8..."
 
           wget -q --show-progress \
-            https://cdn.kernel.org/pub/tools/llvm/files/llvm-22.1.8-x86_64.tar.xz
+            https://www.kernel.org/pub/tools/llvm/files/llvm-22.1.8-x86_64.tar.xz
+
+          echo ""
+          echo "Extracting LLVM..."
 
           tar -xf llvm-22.1.8-x86_64.tar.xz
 
-          LLVM_DIR="$HOME/toolchains/llvm-22.1.8"
+          echo ""
+          echo "Extracted directories:"
+          find "$TOOLCHAIN_DIR" -maxdepth 1 -type d -print
+
+          # Cari direktori LLVM hasil ekstraksi
+          LLVM_DIR="$(find "$TOOLCHAIN_DIR" \
+            -maxdepth 1 \
+            -type d \
+            -name 'llvm-22.1.8*' \
+            | head -n 1)"
+
+          if [ -z "$LLVM_DIR" ]; then
+            echo "ERROR: LLVM directory tidak ditemukan."
+            exit 1
+          fi
+
+          echo ""
+          echo "LLVM directory:"
+          echo "$LLVM_DIR"
+
+          if [ ! -x "$LLVM_DIR/bin/clang" ]; then
+            echo "ERROR: clang tidak ditemukan di:"
+            echo "$LLVM_DIR/bin/clang"
+
+            echo ""
+            echo "Isi directory:"
+            find "$LLVM_DIR" -maxdepth 2 -type f | head -n 100
+
+            exit 1
+          fi
+
+          echo ""
+          echo "LLVM clang ditemukan."
 
           echo "LLVM_DIR=$LLVM_DIR" >> "$GITHUB_ENV"
           echo "$LLVM_DIR/bin" >> "$GITHUB_PATH"
 
-          echo "LLVM installed:"
+          echo ""
+          echo "clang version:"
           "$LLVM_DIR/bin/clang" --version
+
+          echo ""
+          echo "ld.lld version:"
           "$LLVM_DIR/bin/ld.lld" --version
 
-      # ============================================================
-      # 4. SHOW SOURCE INFORMATION
-      # ============================================================
-      - name: Show kernel information
-        run: |
-          echo "=========================================="
-          echo "POCO F5 / MARBLE KERNEL BUILD"
-          echo "=========================================="
-
-          echo "Kernel:"
-          git remote -v
-
           echo ""
-          echo "Commit:"
-          git log -1 --oneline
-
-          echo ""
-          echo "Branch:"
-          git branch --show-current
-
-          echo ""
-          echo "Compiler:"
-          clang --version
-
-          echo ""
-          echo "LLVM:"
-          llvm-ar --version | head -n 1
+          echo "LLVM installation OK."
 
       # ============================================================
-      # 5. SET LLVM BUILD ENVIRONMENT
-      #
-      # Ini bagian penting yang memperbaiki error:
-      #
-      # gcc: error: unrecognized command-line option '-mlittle-endian'
-      #
-      # Kernel ARM64 harus dikompilasi menggunakan ARM64-capable
-      # LLVM/Clang, bukan GCC host.
+      # 4. CHECK TOOLCHAIN
       # ============================================================
-      - name: Configure LLVM toolchain
+      - name: Verify toolchain
         run: |
           set -e
 
-          echo "ARCH=arm64" >> "$GITHUB_ENV"
-          echo "LLVM=1" >> "$GITHUB_ENV"
-          echo "LLVM_IAS=1" >> "$GITHUB_ENV"
+          echo "=========================================="
+          echo "TOOLCHAIN CHECK"
+          echo "=========================================="
 
-          echo "HOSTCC=gcc" >> "$GITHUB_ENV"
-          echo "HOSTCXX=g++" >> "$GITHUB_ENV"
-
-          echo "LLVM toolchain configured."
+          echo ""
+          echo "LLVM_DIR:"
+          echo "$LLVM_DIR"
 
           echo ""
           echo "clang:"
@@ -140,8 +148,61 @@ jobs:
           which ld.lld
           ld.lld --version
 
+          echo ""
+          echo "llvm-ar:"
+          which llvm-ar
+          llvm-ar --version | head -n 1
+
+          echo ""
+          echo "LLVM TOOLCHAIN READY."
+
       # ============================================================
-      # 6. CHECK MARBLE DEFCONFIG
+      # 5. KERNEL BUILD ENVIRONMENT
+      # ============================================================
+      - name: Configure build environment
+        run: |
+          set -e
+
+          echo "ARCH=arm64" >> "$GITHUB_ENV"
+          echo "LLVM=1" >> "$GITHUB_ENV"
+          echo "LLVM_IAS=1" >> "$GITHUB_ENV"
+
+          echo "HOSTCC=gcc" >> "$GITHUB_ENV"
+          echo "HOSTCXX=g++" >> "$GITHUB_ENV"
+
+          echo ""
+          echo "Kernel build environment:"
+          echo "ARCH=arm64"
+          echo "LLVM=1"
+          echo "LLVM_IAS=1"
+
+      # ============================================================
+      # 6. SHOW KERNEL INFORMATION
+      # ============================================================
+      - name: Show kernel information
+        run: |
+          echo "=========================================="
+          echo "POCO F5 / MARBLE"
+          echo "=========================================="
+
+          echo ""
+          echo "Repository:"
+          git remote -v
+
+          echo ""
+          echo "Commit:"
+          git log -1 --oneline
+
+          echo ""
+          echo "Branch:"
+          git branch --show-current
+
+          echo ""
+          echo "Kernel Makefile:"
+          head -n 15 Makefile
+
+      # ============================================================
+      # 7. CREATE MARBLE DEFCONFIG
       # ============================================================
       - name: Prepare marble defconfig
         run: |
@@ -158,19 +219,15 @@ jobs:
 
           echo ""
           echo "=========================================="
-          echo "BASE DEFCONFIG CREATED"
+          echo "MARBLE DEFCONFIG CREATED"
           echo "=========================================="
 
-          grep -E \
-            'CONFIG_ARM64|CONFIG_KPROBES|CONFIG_EXT4_FS' \
-            out/.config || true
+          test -f out/.config
+
+          ls -lh out/.config
 
       # ============================================================
-      # 7. CLONE BAKASU
-      #
-      # BakaSU adalah downstream KernelSU / penerus ReSukiSU.
-      # Kita ambil source kernel-nya, tetapi TIDAK asal menambahkan
-      # CONFIG_KSU_SUSFS tanpa source SUSFS yang sebenarnya.
+      # 8. CLONE BAKASU
       # ============================================================
       - name: Clone BakaSU
         run: |
@@ -183,7 +240,7 @@ jobs:
 
           echo ""
           echo "=========================================="
-          echo "BAKASU VERSION"
+          echo "BAKASU SOURCE"
           echo "=========================================="
 
           cd bakasu
@@ -191,34 +248,44 @@ jobs:
           git log -1 --oneline
 
           echo ""
-          echo "BakaSU kernel tree:"
-          find kernel -maxdepth 2 -type f | head -n 50
+          echo "Kernel directory:"
+          ls -la kernel
 
       # ============================================================
-      # 8. INTEGRATE BAKASU KERNEL SOURCE
-      #
-      # Hanya dilakukan jika source tree KernelSU memang tersedia.
+      # 9. CHECK BAKASU KERNEL SOURCE
       # ============================================================
-      - name: Integrate BakaSU kernel
+      - name: Check BakaSU kernel source
         run: |
           set -e
 
           if [ ! -d "bakasu/kernel" ]; then
-            echo "ERROR: BakaSU kernel directory tidak ditemukan."
+            echo "ERROR: bakasu/kernel tidak ditemukan."
             exit 1
           fi
 
           if [ ! -f "bakasu/kernel/Kconfig" ]; then
-            echo "ERROR: BakaSU kernel/Kconfig tidak ditemukan."
+            echo "ERROR: bakasu/kernel/Kconfig tidak ditemukan."
             exit 1
           fi
 
           if [ ! -f "bakasu/kernel/Makefile" ]; then
-            echo "ERROR: BakaSU kernel/Makefile tidak ditemukan."
+            echo "ERROR: bakasu/kernel/Makefile tidak ditemukan."
             exit 1
           fi
 
-          echo "BakaSU kernel source ditemukan."
+          echo "BakaSU kernel source:"
+          echo "OK"
+
+          echo ""
+          echo "Kconfig:"
+          head -n 30 bakasu/kernel/Kconfig
+
+      # ============================================================
+      # 10. INTEGRATE BAKASU
+      # ============================================================
+      - name: Integrate BakaSU
+        run: |
+          set -e
 
           rm -rf KernelSU
 
@@ -226,65 +293,38 @@ jobs:
 
           cp -a bakasu/kernel/. KernelSU/
 
-          echo ""
-          echo "=========================================="
-          echo "BAKASU KERNEL INTEGRATED"
-          echo "=========================================="
+          echo "BakaSU kernel source copied."
 
           test -f KernelSU/Kconfig
           test -f KernelSU/Makefile
 
+          echo ""
           echo "KernelSU/Kconfig : OK"
           echo "KernelSU/Makefile: OK"
 
       # ============================================================
-      # 9. CONNECT KERNELSU KCONFIG
+      # 11. CONNECT KERNELSU KCONFIG
       # ============================================================
-      - name: Add KernelSU to kernel Kconfig
+      - name: Connect KernelSU Kconfig
         run: |
           set -e
 
           if grep -q 'source "KernelSU/Kconfig"' Kconfig; then
             echo "KernelSU Kconfig sudah terhubung."
           else
-            echo ""
+            echo "" >> Kconfig
             echo 'source "KernelSU/Kconfig"' >> Kconfig
-            echo "KernelSU Kconfig berhasil ditambahkan."
+            echo "KernelSU Kconfig ditambahkan."
           fi
 
           echo ""
-          echo "Checking KernelSU Kconfig:"
-          grep -n 'KernelSU/Kconfig' Kconfig || true
+          echo "KernelSU Kconfig entry:"
+          grep -n 'KernelSU/Kconfig' Kconfig
 
       # ============================================================
-      # 10. ENABLE KERNELSU
-      #
-      # Jangan paksa CONFIG_KSU_SUSFS di sini.
-      # SUSFS harus benar-benar ada source/integrasinya dulu.
+      # 12. REGENERATE CONFIG
       # ============================================================
-      - name: Enable KernelSU
-        run: |
-          set -e
-
-          CONFIG="out/.config"
-
-          echo ""
-          echo "Checking KernelSU config availability..."
-
-          if grep -q '^CONFIG_KSU=' "$CONFIG"; then
-            sed -i 's/^CONFIG_KSU=.*/CONFIG_KSU=y/' "$CONFIG"
-          else
-            echo "CONFIG_KSU=y" >> "$CONFIG"
-          fi
-
-          echo ""
-          echo "KernelSU configuration:"
-          grep -E '^CONFIG_KSU=' "$CONFIG" || true
-
-      # ============================================================
-      # 11. NORMALIZE CONFIGURATION
-      # ============================================================
-      - name: Run olddefconfig
+      - name: Regenerate kernel configuration
         run: |
           set -e
 
@@ -296,18 +336,33 @@ jobs:
             olddefconfig
 
           echo ""
-          echo "Final KernelSU configuration:"
-          grep -E '^CONFIG_KSU=' out/.config || true
+          echo "Configuration regenerated."
 
       # ============================================================
-      # 12. BUILD KERNEL
+      # 13. CHECK KSU CONFIG
+      # ============================================================
+      - name: Check KernelSU configuration
+        run: |
+          set -e
+
+          echo "=========================================="
+          echo "KSU CONFIG CHECK"
+          echo "=========================================="
+
+          grep -E \
+            'CONFIG_KSU|CONFIG_KPROBES' \
+            out/.config \
+            || true
+
+      # ============================================================
+      # 14. BUILD KERNEL
       # ============================================================
       - name: Build kernel
         run: |
           set -o pipefail
 
           echo "=========================================="
-          echo "STARTING KERNEL BUILD"
+          echo "START BUILD"
           echo "=========================================="
 
           make \
@@ -321,17 +376,18 @@ jobs:
             2>&1 | tee build.log
 
       # ============================================================
-      # 13. CHECK BUILD OUTPUT
+      # 15. VERIFY IMAGE
       # ============================================================
-      - name: Verify build output
+      - name: Verify kernel image
         run: |
           set -e
 
-          echo ""
           echo "=========================================="
-          echo "BUILD OUTPUT"
+          echo "VERIFY BUILD"
           echo "=========================================="
 
+          echo ""
+          echo "Boot directory:"
           find out/arch/arm64/boot \
             -maxdepth 2 \
             -type f \
@@ -344,44 +400,32 @@ jobs:
             -print
 
           echo ""
-          echo "Checking Image..."
 
-          if [ -f out/arch/arm64/boot/Image ]; then
-            ls -lh out/arch/arm64/boot/Image
-          else
+          if [ ! -f out/arch/arm64/boot/Image ]; then
             echo "ERROR: Image tidak ditemukan."
             exit 1
           fi
 
-          echo ""
-          echo "Checking Image.gz..."
+          echo "Image:"
+          ls -lh out/arch/arm64/boot/Image
 
           if [ -f out/arch/arm64/boot/Image.gz ]; then
+            echo ""
+            echo "Image.gz:"
             ls -lh out/arch/arm64/boot/Image.gz
-          else
-            echo "WARNING: Image.gz tidak ditemukan."
           fi
 
-      # ============================================================
-      # 14. CHECK FINAL CONFIG
-      # ============================================================
-      - name: Show final configuration
-        run: |
-          echo "=========================================="
-          echo "FINAL CONFIG"
-          echo "=========================================="
-
-          grep -E \
-            'CONFIG_KSU|CONFIG_KPROBES|CONFIG_EXT4_FS' \
-            out/.config || true
+          echo ""
+          echo "BUILD IMAGE OK."
 
       # ============================================================
-      # 15. GENERATE SHA256
+      # 16. COLLECT ARTIFACTS
       # ============================================================
-      - name: Generate checksums
+      - name: Collect artifacts
         run: |
           set -e
 
+          rm -rf artifacts
           mkdir -p artifacts
 
           cp out/arch/arm64/boot/Image \
@@ -392,27 +436,42 @@ jobs:
               artifacts/Image.gz
           fi
 
+          cp out/.config \
+            artifacts/kernel.config
+
+          cp build.log \
+            artifacts/build.log
+
+          echo ""
+          echo "Collecting marble DTB/DTBO files..."
+
           find out/arch/arm64/boot \
             -type f \
-            \( -name "*.dtb" -o -name "*.dtbo" \) \
-            -exec cp --parents {} artifacts/ \; \
+            \( \
+              -name "*.dtb" \
+              -o -name "*.dtbo" \
+            \) \
+            -exec cp {} artifacts/ \; \
             || true
 
-          cp out/.config artifacts/kernel.config
+          echo ""
+          echo "Artifacts:"
+          ls -lh artifacts
 
-          cp build.log artifacts/build.log
+      # ============================================================
+      # 17. SHA256
+      # ============================================================
+      - name: Generate SHA256
+        run: |
+          set -e
 
           cd artifacts
 
-          sha256sum \
-            Image \
-            Image.gz \
-            kernel.config \
-            2>/dev/null \
+          sha256sum * \
             | tee SHA256SUMS.txt
 
       # ============================================================
-      # 16. UPLOAD ARTIFACTS
+      # 18. UPLOAD KERNEL
       # ============================================================
       - name: Upload kernel artifacts
         uses: actions/upload-artifact@v4
@@ -423,7 +482,7 @@ jobs:
           retention-days: 7
 
       # ============================================================
-      # 17. UPLOAD FULL BUILD LOG
+      # 19. UPLOAD LOGS
       # ============================================================
       - name: Upload build logs
         if: always()
