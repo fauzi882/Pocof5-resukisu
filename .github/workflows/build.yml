@@ -1,4 +1,4 @@
-name: Build POCO F5 Marble BakaSU
+name: Build POCO F5 Marble BakaSU SUSFS
 
 on:
   workflow_dispatch:
@@ -8,13 +8,13 @@ permissions:
 
 jobs:
   build:
-    name: Build Marble Kernel
+    name: Build Marble BakaSU SUSFS
     runs-on: ubuntu-22.04
 
     steps:
 
       # ============================================================
-      # 1. CHECKOUT KERNEL
+      # 1. CHECKOUT MARBLE KERNEL
       # ============================================================
       - name: Checkout Marble Kernel
         uses: actions/checkout@v4
@@ -24,7 +24,7 @@ jobs:
           fetch-depth: 1
 
       # ============================================================
-      # 2. INSTALL DEPENDENCIES
+      # 2. INSTALL BUILD DEPENDENCIES
       # ============================================================
       - name: Install dependencies
         run: |
@@ -37,6 +37,7 @@ jobs:
             bison \
             build-essential \
             ccache \
+            clang \
             curl \
             flex \
             git \
@@ -45,6 +46,7 @@ jobs:
             lld \
             llvm \
             make \
+            patch \
             python3 \
             rsync \
             unzip \
@@ -65,21 +67,11 @@ jobs:
 
           cd "$TOOLCHAIN_DIR"
 
-          echo "Downloading LLVM 22.1.8..."
-
           wget -q --show-progress \
             https://www.kernel.org/pub/tools/llvm/files/llvm-22.1.8-x86_64.tar.xz
 
-          echo ""
-          echo "Extracting LLVM..."
-
           tar -xf llvm-22.1.8-x86_64.tar.xz
 
-          echo ""
-          echo "Extracted directories:"
-          find "$TOOLCHAIN_DIR" -maxdepth 1 -type d -print
-
-          # Cari direktori LLVM hasil ekstraksi
           LLVM_DIR="$(find "$TOOLCHAIN_DIR" \
             -maxdepth 1 \
             -type d \
@@ -87,79 +79,30 @@ jobs:
             | head -n 1)"
 
           if [ -z "$LLVM_DIR" ]; then
-            echo "ERROR: LLVM directory tidak ditemukan."
+            echo "ERROR: LLVM directory not found."
             exit 1
           fi
-
-          echo ""
-          echo "LLVM directory:"
-          echo "$LLVM_DIR"
 
           if [ ! -x "$LLVM_DIR/bin/clang" ]; then
-            echo "ERROR: clang tidak ditemukan di:"
-            echo "$LLVM_DIR/bin/clang"
-
-            echo ""
-            echo "Isi directory:"
+            echo "ERROR: clang not found."
             find "$LLVM_DIR" -maxdepth 2 -type f | head -n 100
-
             exit 1
           fi
-
-          echo ""
-          echo "LLVM clang ditemukan."
 
           echo "LLVM_DIR=$LLVM_DIR" >> "$GITHUB_ENV"
           echo "$LLVM_DIR/bin" >> "$GITHUB_PATH"
 
-          echo ""
-          echo "clang version:"
-          "$LLVM_DIR/bin/clang" --version
-
-          echo ""
-          echo "ld.lld version:"
-          "$LLVM_DIR/bin/ld.lld" --version
-
-          echo ""
-          echo "LLVM installation OK."
-
-      # ============================================================
-      # 4. CHECK TOOLCHAIN
-      # ============================================================
-      - name: Verify toolchain
-        run: |
-          set -e
-
           echo "=========================================="
-          echo "TOOLCHAIN CHECK"
+          echo "LLVM"
           echo "=========================================="
 
-          echo ""
-          echo "LLVM_DIR:"
-          echo "$LLVM_DIR"
-
-          echo ""
-          echo "clang:"
-          which clang
           clang --version
-
-          echo ""
-          echo "ld.lld:"
-          which ld.lld
           ld.lld --version
 
-          echo ""
-          echo "llvm-ar:"
-          which llvm-ar
-          llvm-ar --version | head -n 1
-
-          echo ""
-          echo "LLVM TOOLCHAIN READY."
-
       # ============================================================
-      # 5. KERNEL BUILD ENVIRONMENT
+      # 4. CONFIGURE LLVM
       # ============================================================
-      - name: Configure build environment
+      - name: Configure LLVM environment
         run: |
           set -e
 
@@ -170,39 +113,31 @@ jobs:
           echo "HOSTCC=gcc" >> "$GITHUB_ENV"
           echo "HOSTCXX=g++" >> "$GITHUB_ENV"
 
-          echo ""
-          echo "Kernel build environment:"
-          echo "ARCH=arm64"
-          echo "LLVM=1"
-          echo "LLVM_IAS=1"
+          echo "LLVM environment ready."
 
       # ============================================================
-      # 6. SHOW KERNEL INFORMATION
+      # 5. SHOW KERNEL SOURCE
       # ============================================================
-      - name: Show kernel information
+      - name: Show source information
         run: |
           echo "=========================================="
-          echo "POCO F5 / MARBLE"
+          echo "MARBLE KERNEL"
           echo "=========================================="
-
-          echo ""
-          echo "Repository:"
-          git remote -v
 
           echo ""
           echo "Commit:"
           git log -1 --oneline
 
           echo ""
-          echo "Branch:"
-          git branch --show-current
+          echo "Remote:"
+          git remote -v
 
           echo ""
-          echo "Kernel Makefile:"
-          head -n 15 Makefile
+          echo "Compiler:"
+          clang --version
 
       # ============================================================
-      # 7. CREATE MARBLE DEFCONFIG
+      # 6. CREATE MARBLE DEFCONFIG
       # ============================================================
       - name: Prepare marble defconfig
         run: |
@@ -217,17 +152,12 @@ jobs:
             LLVM_IAS=1 \
             marble_defconfig
 
-          echo ""
-          echo "=========================================="
-          echo "MARBLE DEFCONFIG CREATED"
-          echo "=========================================="
-
           test -f out/.config
 
-          ls -lh out/.config
+          echo "Marble defconfig created."
 
       # ============================================================
-      # 8. CLONE BAKASU
+      # 7. CLONE BAKASU
       # ============================================================
       - name: Clone BakaSU
         run: |
@@ -238,50 +168,19 @@ jobs:
             https://github.com/Baka-SU/BakaSU.git \
             bakasu
 
-          echo ""
           echo "=========================================="
-          echo "BAKASU SOURCE"
+          echo "BAKASU"
           echo "=========================================="
 
           cd bakasu
 
           git log -1 --oneline
 
-          echo ""
-          echo "Kernel directory:"
-          ls -la kernel
+          test -f kernel/Kconfig
+          test -f kernel/Makefile
 
       # ============================================================
-      # 9. CHECK BAKASU KERNEL SOURCE
-      # ============================================================
-      - name: Check BakaSU kernel source
-        run: |
-          set -e
-
-          if [ ! -d "bakasu/kernel" ]; then
-            echo "ERROR: bakasu/kernel tidak ditemukan."
-            exit 1
-          fi
-
-          if [ ! -f "bakasu/kernel/Kconfig" ]; then
-            echo "ERROR: bakasu/kernel/Kconfig tidak ditemukan."
-            exit 1
-          fi
-
-          if [ ! -f "bakasu/kernel/Makefile" ]; then
-            echo "ERROR: bakasu/kernel/Makefile tidak ditemukan."
-            exit 1
-          fi
-
-          echo "BakaSU kernel source:"
-          echo "OK"
-
-          echo ""
-          echo "Kconfig:"
-          head -n 30 bakasu/kernel/Kconfig
-
-      # ============================================================
-      # 10. INTEGRATE BAKASU
+      # 8. INTEGRATE BAKASU
       # ============================================================
       - name: Integrate BakaSU
         run: |
@@ -293,38 +192,228 @@ jobs:
 
           cp -a bakasu/kernel/. KernelSU/
 
-          echo "BakaSU kernel source copied."
-
           test -f KernelSU/Kconfig
           test -f KernelSU/Makefile
 
-          echo ""
-          echo "KernelSU/Kconfig : OK"
-          echo "KernelSU/Makefile: OK"
+          echo "BakaSU kernel source integrated."
 
       # ============================================================
-      # 11. CONNECT KERNELSU KCONFIG
+      # 9. CONNECT KERNELSU
       # ============================================================
       - name: Connect KernelSU Kconfig
         run: |
           set -e
 
           if grep -q 'source "KernelSU/Kconfig"' Kconfig; then
-            echo "KernelSU Kconfig sudah terhubung."
+            echo "KernelSU already connected."
           else
             echo "" >> Kconfig
             echo 'source "KernelSU/Kconfig"' >> Kconfig
-            echo "KernelSU Kconfig ditambahkan."
           fi
 
-          echo ""
-          echo "KernelSU Kconfig entry:"
           grep -n 'KernelSU/Kconfig' Kconfig
 
       # ============================================================
-      # 12. REGENERATE CONFIG
+      # 10. ENABLE KSU
       # ============================================================
-      - name: Regenerate kernel configuration
+      - name: Enable KernelSU
+        run: |
+          set -e
+
+          CONFIG="out/.config"
+
+          if grep -q '^CONFIG_KSU=' "$CONFIG"; then
+            sed -i 's/^CONFIG_KSU=.*/CONFIG_KSU=y/' "$CONFIG"
+          else
+            echo "CONFIG_KSU=y" >> "$CONFIG"
+          fi
+
+      # ============================================================
+      # 11. CLONE SUSFS
+      #
+      # Kernel 5.10 -> gki-android12-5.10
+      # ============================================================
+      - name: Clone SUSFS
+        run: |
+          set -e
+
+          git clone \
+            --depth=1 \
+            --branch gki-android12-5.10 \
+            https://gitlab.com/simonpunk/susfs4ksu.git \
+            susfs
+
+          echo "=========================================="
+          echo "SUSFS"
+          echo "=========================================="
+
+          cd susfs
+
+          git log -1 --oneline
+
+          echo ""
+          echo "SUSFS patch files:"
+
+          find kernel_patches \
+            -maxdepth 3 \
+            -type f \
+            | sort
+
+      # ============================================================
+      # 12. DETECT SUSFS KERNEL PATCH
+      # ============================================================
+      - name: Locate SUSFS kernel patch
+        run: |
+          set -e
+
+          echo "Searching SUSFS kernel patch..."
+
+          PATCH_FILE="$(find susfs/kernel_patches \
+            -type f \
+            -name '50_add_susfs_in_kernel-5.10*.patch' \
+            | head -n 1)"
+
+          if [ -z "$PATCH_FILE" ]; then
+            echo "ERROR: SUSFS 5.10 kernel patch not found."
+
+            find susfs/kernel_patches \
+              -type f \
+              | sort
+
+            exit 1
+          fi
+
+          echo "SUSFS_PATCH=$PATCH_FILE" >> "$GITHUB_ENV"
+
+          echo ""
+          echo "Selected patch:"
+          echo "$PATCH_FILE"
+
+      # ============================================================
+      # 13. COPY SUSFS FILES
+      # ============================================================
+      - name: Copy SUSFS kernel files
+        run: |
+          set -e
+
+          echo "Copying SUSFS kernel files..."
+
+          # SUSFS implementation
+          cp -av \
+            susfs/kernel_patches/fs/* \
+            fs/
+
+          # SUSFS headers
+          cp -av \
+            susfs/kernel_patches/include/linux/* \
+            include/linux/
+
+          echo ""
+          echo "Checking SUSFS files..."
+
+          find fs \
+            -maxdepth 1 \
+            -type f \
+            -iname '*sus*' \
+            -print
+
+          find include/linux \
+            -maxdepth 1 \
+            -type f \
+            -iname '*sus*' \
+            -print
+
+      # ============================================================
+      # 14. APPLY SUSFS KERNELSU PATCH
+      # ============================================================
+      - name: Apply SUSFS KernelSU patch
+        run: |
+          set -e
+
+          PATCH_KSU="susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
+
+          if [ ! -f "$PATCH_KSU" ]; then
+            echo "ERROR: KernelSU SUSFS patch not found."
+            exit 1
+          fi
+
+          echo "Applying:"
+          echo "$PATCH_KSU"
+
+          cd KernelSU
+
+          patch \
+            --forward \
+            -p1 \
+            < "../$PATCH_KSU" \
+            2>&1 | tee ../susfs-ksu-patch.log
+
+          cd ..
+
+          echo "KernelSU SUSFS patch step completed."
+
+      # ============================================================
+      # 15. APPLY SUSFS KERNEL PATCH
+      # ============================================================
+      - name: Apply SUSFS kernel patch
+        run: |
+          set -e
+
+          if [ -z "$SUSFS_PATCH" ]; then
+            echo "ERROR: SUSFS_PATCH is empty."
+            exit 1
+          fi
+
+          echo "Applying:"
+          echo "$SUSFS_PATCH"
+
+          patch \
+            --forward \
+            -p1 \
+            < "$SUSFS_PATCH" \
+            2>&1 | tee susfs-kernel-patch.log
+
+          echo "SUSFS kernel patch step completed."
+
+      # ============================================================
+      # 16. VERIFY SUSFS SOURCE
+      # ============================================================
+      - name: Verify SUSFS source
+        run: |
+          set -e
+
+          echo "=========================================="
+          echo "VERIFY SUSFS SOURCE"
+          echo "=========================================="
+
+          echo ""
+          echo "susfs.c:"
+          test -f fs/susfs.c
+          ls -lh fs/susfs.c
+
+          echo ""
+          echo "susfs headers:"
+          find include/linux \
+            -maxdepth 1 \
+            -type f \
+            -iname 'susfs*.h' \
+            -print
+
+          echo ""
+          echo "SUSFS references:"
+          grep -R \
+            "CONFIG_KSU_SUSFS" \
+            -n KernelSU \
+            fs \
+            include/linux \
+            2>/dev/null \
+            | head -n 50 \
+            || true
+
+      # ============================================================
+      # 17. REGENERATE CONFIG
+      # ============================================================
+      - name: Regenerate configuration
         run: |
           set -e
 
@@ -336,33 +425,87 @@ jobs:
             olddefconfig
 
           echo ""
-          echo "Configuration regenerated."
-
-      # ============================================================
-      # 13. CHECK KSU CONFIG
-      # ============================================================
-      - name: Check KernelSU configuration
-        run: |
-          set -e
-
           echo "=========================================="
-          echo "KSU CONFIG CHECK"
+          echo "SUSFS CONFIGURATION"
           echo "=========================================="
 
           grep -E \
-            'CONFIG_KSU|CONFIG_KPROBES' \
+            '^CONFIG_KSU|^CONFIG_KSU_SUSFS' \
             out/.config \
             || true
 
       # ============================================================
-      # 14. BUILD KERNEL
+      # 18. FORCE REQUIRED SUSFS OPTIONS
+      #
+      # Only after source + Kconfig exist.
+      # ============================================================
+      - name: Enable SUSFS configuration
+        run: |
+          set -e
+
+          CONFIG="out/.config"
+
+          echo "Enabling SUSFS..."
+
+          scripts/config \
+            --enable CONFIG_KSU \
+            --enable CONFIG_KSU_SUSFS
+
+          # Do NOT enable SUS_SU blindly when another KSU hook
+          # implementation is already present.
+          scripts/config \
+            --disable CONFIG_KSU_SUSFS_SUS_SU \
+            || true
+
+          # Magic mount support
+          scripts/config \
+            --enable CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT \
+            || true
+
+          make \
+            O=out \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            olddefconfig
+
+          echo ""
+          echo "Final SUSFS config:"
+
+          grep -E \
+            '^CONFIG_KSU=|^CONFIG_KSU_SUSFS=|^CONFIG_KSU_SUSFS_' \
+            out/.config \
+            || true
+
+      # ============================================================
+      # 19. HARD VALIDATION
+      # ============================================================
+      - name: Validate SUSFS configuration
+        run: |
+          set -e
+
+          echo "Checking CONFIG_KSU..."
+
+          grep -q '^CONFIG_KSU=y' out/.config
+
+          echo "Checking CONFIG_KSU_SUSFS..."
+
+          grep -q '^CONFIG_KSU_SUSFS=y' out/.config
+
+          echo ""
+          echo "=========================================="
+          echo "SUSFS CONFIGURATION VALID"
+          echo "=========================================="
+
+      # ============================================================
+      # 20. BUILD
       # ============================================================
       - name: Build kernel
         run: |
           set -o pipefail
 
           echo "=========================================="
-          echo "START BUILD"
+          echo "BUILDING BAKASU + SUSFS"
           echo "=========================================="
 
           make \
@@ -376,36 +519,19 @@ jobs:
             2>&1 | tee build.log
 
       # ============================================================
-      # 15. VERIFY IMAGE
+      # 21. VERIFY IMAGE
       # ============================================================
       - name: Verify kernel image
         run: |
           set -e
 
           echo "=========================================="
-          echo "VERIFY BUILD"
+          echo "VERIFY KERNEL"
           echo "=========================================="
 
-          echo ""
-          echo "Boot directory:"
-          find out/arch/arm64/boot \
-            -maxdepth 2 \
-            -type f \
-            \( \
-              -name "Image" \
-              -o -name "Image.gz" \
-              -o -name "*.dtb" \
-              -o -name "*.dtbo" \
-            \) \
-            -print
+          test -f out/arch/arm64/boot/Image
 
           echo ""
-
-          if [ ! -f out/arch/arm64/boot/Image ]; then
-            echo "ERROR: Image tidak ditemukan."
-            exit 1
-          fi
-
           echo "Image:"
           ls -lh out/arch/arm64/boot/Image
 
@@ -415,11 +541,22 @@ jobs:
             ls -lh out/arch/arm64/boot/Image.gz
           fi
 
-          echo ""
-          echo "BUILD IMAGE OK."
+      # ============================================================
+      # 22. VERIFY FINAL CONFIG
+      # ============================================================
+      - name: Verify final configuration
+        run: |
+          echo "=========================================="
+          echo "FINAL KERNEL CONFIG"
+          echo "=========================================="
+
+          grep -E \
+            '^CONFIG_KSU=|^CONFIG_KSU_SUSFS=|^CONFIG_KSU_SUSFS_' \
+            out/.config \
+            || true
 
       # ============================================================
-      # 16. COLLECT ARTIFACTS
+      # 23. COLLECT ARTIFACTS
       # ============================================================
       - name: Collect artifacts
         run: |
@@ -428,22 +565,36 @@ jobs:
           rm -rf artifacts
           mkdir -p artifacts
 
-          cp out/arch/arm64/boot/Image \
+          cp \
+            out/arch/arm64/boot/Image \
             artifacts/Image
 
           if [ -f out/arch/arm64/boot/Image.gz ]; then
-            cp out/arch/arm64/boot/Image.gz \
+            cp \
+              out/arch/arm64/boot/Image.gz \
               artifacts/Image.gz
           fi
 
-          cp out/.config \
+          cp \
+            out/.config \
             artifacts/kernel.config
 
-          cp build.log \
+          cp \
+            build.log \
             artifacts/build.log
 
+          cp \
+            susfs-ksu-patch.log \
+            artifacts/susfs-ksu-patch.log \
+            || true
+
+          cp \
+            susfs-kernel-patch.log \
+            artifacts/susfs-kernel-patch.log \
+            || true
+
           echo ""
-          echo "Collecting marble DTB/DTBO files..."
+          echo "Collecting DTB/DTBO..."
 
           find out/arch/arm64/boot \
             -type f \
@@ -459,7 +610,7 @@ jobs:
           ls -lh artifacts
 
       # ============================================================
-      # 17. SHA256
+      # 24. SHA256
       # ============================================================
       - name: Generate SHA256
         run: |
@@ -471,26 +622,28 @@ jobs:
             | tee SHA256SUMS.txt
 
       # ============================================================
-      # 18. UPLOAD KERNEL
+      # 25. UPLOAD RESULT
       # ============================================================
       - name: Upload kernel artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: POCO-F5-Marble-BakaSU-Kernel
+          name: POCO-F5-Marble-BakaSU-SUSFS-Kernel
           path: artifacts/
           if-no-files-found: error
           retention-days: 7
 
       # ============================================================
-      # 19. UPLOAD LOGS
+      # 26. UPLOAD LOGS
       # ============================================================
-      - name: Upload build logs
+      - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: POCO-F5-Marble-BakaSU-Build-Logs
+          name: POCO-F5-Marble-BakaSU-SUSFS-Logs
           path: |
             build.log
+            susfs-ksu-patch.log
+            susfs-kernel-patch.log
             out/.config
           if-no-files-found: warn
           retention-days: 7
