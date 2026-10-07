@@ -3,13 +3,18 @@ name: Build POCO F5 Marble BakaSU
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
-    name: Build Marble Kernel with BakaSU
+    name: Build Marble Kernel
     runs-on: ubuntu-22.04
 
     steps:
-
+      # ============================================================
+      # 1. CHECKOUT KERNEL SOURCE
+      # ============================================================
       - name: Checkout Marble Kernel
         uses: actions/checkout@v4
         with:
@@ -17,7 +22,10 @@ jobs:
           ref: melt-rebase
           fetch-depth: 1
 
-      - name: Install Dependencies
+      # ============================================================
+      # 2. INSTALL BUILD DEPENDENCIES
+      # ============================================================
+      - name: Install dependencies
         run: |
           sudo apt-get update
 
@@ -34,197 +42,396 @@ jobs:
             libssl-dev \
             lld \
             llvm \
+            make \
             python3 \
+            python3-pip \
             rsync \
             unzip \
+            wget \
+            xz-utils \
             zip
 
-      - name: Show Kernel Information
+      # ============================================================
+      # 3. DOWNLOAD SLIM LLVM 22.1.8
+      #
+      # Melt v5.0 menggunakan Slim LLVM 22.1.8.
+      # Kita sengaja tidak memakai GCC host sebagai compiler kernel.
+      # ============================================================
+      - name: Install Slim LLVM 22.1.8
         run: |
-          echo "======================================"
-          echo "POCO F5 / MARBLE"
-          echo "======================================"
+          set -e
 
+          mkdir -p "$HOME/toolchains"
+
+          cd "$HOME/toolchains"
+
+          wget -q --show-progress \
+            https://cdn.kernel.org/pub/tools/llvm/files/llvm-22.1.8-x86_64.tar.xz
+
+          tar -xf llvm-22.1.8-x86_64.tar.xz
+
+          LLVM_DIR="$HOME/toolchains/llvm-22.1.8"
+
+          echo "LLVM_DIR=$LLVM_DIR" >> "$GITHUB_ENV"
+          echo "$LLVM_DIR/bin" >> "$GITHUB_PATH"
+
+          echo "LLVM installed:"
+          "$LLVM_DIR/bin/clang" --version
+          "$LLVM_DIR/bin/ld.lld" --version
+
+      # ============================================================
+      # 4. SHOW SOURCE INFORMATION
+      # ============================================================
+      - name: Show kernel information
+        run: |
+          echo "=========================================="
+          echo "POCO F5 / MARBLE KERNEL BUILD"
+          echo "=========================================="
+
+          echo "Kernel:"
+          git remote -v
+
+          echo ""
           echo "Commit:"
-          git rev-parse HEAD
+          git log -1 --oneline
 
-          echo
-          echo "Kernel version:"
-          make kernelversion
+          echo ""
+          echo "Branch:"
+          git branch --show-current
 
-          echo
-          echo "Defconfig:"
-          ls arch/arm64/configs/ | grep marble
+          echo ""
+          echo "Compiler:"
+          clang --version
 
-      - name: Prepare Defconfig
+          echo ""
+          echo "LLVM:"
+          llvm-ar --version | head -n 1
+
+      # ============================================================
+      # 5. SET LLVM BUILD ENVIRONMENT
+      #
+      # Ini bagian penting yang memperbaiki error:
+      #
+      # gcc: error: unrecognized command-line option '-mlittle-endian'
+      #
+      # Kernel ARM64 harus dikompilasi menggunakan ARM64-capable
+      # LLVM/Clang, bukan GCC host.
+      # ============================================================
+      - name: Configure LLVM toolchain
         run: |
-          export ARCH=arm64
+          set -e
+
+          echo "ARCH=arm64" >> "$GITHUB_ENV"
+          echo "LLVM=1" >> "$GITHUB_ENV"
+          echo "LLVM_IAS=1" >> "$GITHUB_ENV"
+
+          echo "HOSTCC=gcc" >> "$GITHUB_ENV"
+          echo "HOSTCXX=g++" >> "$GITHUB_ENV"
+
+          echo "LLVM toolchain configured."
+
+          echo ""
+          echo "clang:"
+          which clang
+          clang --version
+
+          echo ""
+          echo "ld.lld:"
+          which ld.lld
+          ld.lld --version
+
+      # ============================================================
+      # 6. CHECK MARBLE DEFCONFIG
+      # ============================================================
+      - name: Prepare marble defconfig
+        run: |
+          set -e
 
           mkdir -p out
 
-          make O=out marble_defconfig
+          make \
+            O=out \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            marble_defconfig
 
-          echo
-          echo "Initial configuration:"
+          echo ""
+          echo "=========================================="
+          echo "BASE DEFCONFIG CREATED"
+          echo "=========================================="
+
           grep -E \
-            "CONFIG_ARM64|CONFIG_LTO_CLANG|CONFIG_CFI" \
+            'CONFIG_ARM64|CONFIG_KPROBES|CONFIG_EXT4_FS' \
             out/.config || true
 
-      - name: Integrate BakaSU
+      # ============================================================
+      # 7. CLONE BAKASU
+      #
+      # BakaSU adalah downstream KernelSU / penerus ReSukiSU.
+      # Kita ambil source kernel-nya, tetapi TIDAK asal menambahkan
+      # CONFIG_KSU_SUSFS tanpa source SUSFS yang sebenarnya.
+      # ============================================================
+      - name: Clone BakaSU
         run: |
-          echo "======================================"
-          echo "Installing BakaSU"
-          echo "======================================"
+          set -e
 
           git clone \
             --depth=1 \
             https://github.com/Baka-SU/BakaSU.git \
             bakasu
 
-          echo
-          echo "BakaSU repository:"
+          echo ""
+          echo "=========================================="
+          echo "BAKASU VERSION"
+          echo "=========================================="
+
           cd bakasu
-          git rev-parse HEAD
 
-          echo
-          echo "BakaSU directories:"
-          ls -lah
+          git log -1 --oneline
 
-          cd ..
+          echo ""
+          echo "BakaSU kernel tree:"
+          find kernel -maxdepth 2 -type f | head -n 50
 
-          echo
-          echo "Checking BakaSU kernel directory..."
+      # ============================================================
+      # 8. INTEGRATE BAKASU KERNEL SOURCE
+      #
+      # Hanya dilakukan jika source tree KernelSU memang tersedia.
+      # ============================================================
+      - name: Integrate BakaSU kernel
+        run: |
+          set -e
 
           if [ ! -d "bakasu/kernel" ]; then
-            echo "ERROR: BakaSU kernel directory not found."
+            echo "ERROR: BakaSU kernel directory tidak ditemukan."
             exit 1
           fi
 
-          echo "BakaSU kernel directory found."
+          if [ ! -f "bakasu/kernel/Kconfig" ]; then
+            echo "ERROR: BakaSU kernel/Kconfig tidak ditemukan."
+            exit 1
+          fi
 
-      - name: Integrate BakaSU Kernel
-        run: |
-          echo "======================================"
-          echo "Integrating BakaSU kernel"
-          echo "======================================"
+          if [ ! -f "bakasu/kernel/Makefile" ]; then
+            echo "ERROR: BakaSU kernel/Makefile tidak ditemukan."
+            exit 1
+          fi
+
+          echo "BakaSU kernel source ditemukan."
+
+          rm -rf KernelSU
 
           mkdir -p KernelSU
 
           cp -a bakasu/kernel/. KernelSU/
 
-          echo
-          echo "BakaSU kernel files:"
-          find KernelSU -maxdepth 2 -type f | head -100
+          echo ""
+          echo "=========================================="
+          echo "BAKASU KERNEL INTEGRATED"
+          echo "=========================================="
 
-      - name: Connect KernelSU to Kernel Build
+          test -f KernelSU/Kconfig
+          test -f KernelSU/Makefile
+
+          echo "KernelSU/Kconfig : OK"
+          echo "KernelSU/Makefile: OK"
+
+      # ============================================================
+      # 9. CONNECT KERNELSU KCONFIG
+      # ============================================================
+      - name: Add KernelSU to kernel Kconfig
         run: |
-          echo "======================================"
-          echo "Preparing KernelSU integration"
-          echo "======================================"
+          set -e
 
-          if [ ! -f "KernelSU/Kconfig" ]; then
-            echo "ERROR: KernelSU/Kconfig not found."
-            exit 1
-          fi
-
-          if [ ! -f "KernelSU/Makefile" ]; then
-            echo "ERROR: KernelSU/Makefile not found."
-            exit 1
-          fi
-
-          echo "KernelSU Kconfig found."
-          echo "KernelSU Makefile found."
-
-          echo
-          echo "Searching existing KernelSU references..."
-
-          grep -R \
-            "KernelSU" \
-            arch/arm64/Kconfig \
-            drivers/Kconfig \
-            drivers/Makefile \
-            2>/dev/null || true
-
-      - name: Configure BakaSU
-        run: |
-          export ARCH=arm64
-
-          echo "======================================"
-          echo "Enabling BakaSU"
-          echo "======================================"
-
-          if grep -q "^CONFIG_KSU=" out/.config; then
-            sed -i 's/^CONFIG_KSU=.*/CONFIG_KSU=y/' out/.config
+          if grep -q 'source "KernelSU/Kconfig"' Kconfig; then
+            echo "KernelSU Kconfig sudah terhubung."
           else
-            echo "CONFIG_KSU=y" >> out/.config
+            echo ""
+            echo 'source "KernelSU/Kconfig"' >> Kconfig
+            echo "KernelSU Kconfig berhasil ditambahkan."
           fi
 
-          if grep -q "^CONFIG_KSU_MANUAL_HOOK=" out/.config; then
-            sed -i 's/^CONFIG_KSU_MANUAL_HOOK=.*/CONFIG_KSU_MANUAL_HOOK=y/' out/.config
-          else
-            echo "CONFIG_KSU_MANUAL_HOOK=y" >> out/.config
-          fi
+          echo ""
+          echo "Checking KernelSU Kconfig:"
+          grep -n 'KernelSU/Kconfig' Kconfig || true
 
-          make O=out olddefconfig
-
-          echo
-          echo "BakaSU configuration:"
-          grep -E \
-            "^CONFIG_KSU" \
-            out/.config || true
-
-      - name: Build Kernel
+      # ============================================================
+      # 10. ENABLE KERNELSU
+      #
+      # Jangan paksa CONFIG_KSU_SUSFS di sini.
+      # SUSFS harus benar-benar ada source/integrasinya dulu.
+      # ============================================================
+      - name: Enable KernelSU
         run: |
-          export ARCH=arm64
+          set -e
 
-          echo "======================================"
-          echo "BUILDING KERNEL"
-          echo "======================================"
+          CONFIG="out/.config"
+
+          echo ""
+          echo "Checking KernelSU config availability..."
+
+          if grep -q '^CONFIG_KSU=' "$CONFIG"; then
+            sed -i 's/^CONFIG_KSU=.*/CONFIG_KSU=y/' "$CONFIG"
+          else
+            echo "CONFIG_KSU=y" >> "$CONFIG"
+          fi
+
+          echo ""
+          echo "KernelSU configuration:"
+          grep -E '^CONFIG_KSU=' "$CONFIG" || true
+
+      # ============================================================
+      # 11. NORMALIZE CONFIGURATION
+      # ============================================================
+      - name: Run olddefconfig
+        run: |
+          set -e
 
           make \
             O=out \
-            -j$(nproc) \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            olddefconfig
+
+          echo ""
+          echo "Final KernelSU configuration:"
+          grep -E '^CONFIG_KSU=' out/.config || true
+
+      # ============================================================
+      # 12. BUILD KERNEL
+      # ============================================================
+      - name: Build kernel
+        run: |
+          set -o pipefail
+
+          echo "=========================================="
+          echo "STARTING KERNEL BUILD"
+          echo "=========================================="
+
+          make \
+            O=out \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            -j"$(nproc)" \
             Image.gz \
             dtbs \
             2>&1 | tee build.log
 
-      - name: Verify Build
-        if: always()
+      # ============================================================
+      # 13. CHECK BUILD OUTPUT
+      # ============================================================
+      - name: Verify build output
         run: |
-          echo "======================================"
-          echo "BUILD RESULT"
-          echo "======================================"
+          set -e
 
-          echo
-          echo "Kernel files:"
+          echo ""
+          echo "=========================================="
+          echo "BUILD OUTPUT"
+          echo "=========================================="
+
           find out/arch/arm64/boot \
-            -maxdepth 3 \
+            -maxdepth 2 \
             -type f \
-            2>/dev/null || true
+            \( \
+              -name "Image" \
+              -o -name "Image.gz" \
+              -o -name "*.dtb" \
+              -o -name "*.dtbo" \
+            \) \
+            -print
 
-          echo
-          echo "BakaSU configuration:"
+          echo ""
+          echo "Checking Image..."
+
+          if [ -f out/arch/arm64/boot/Image ]; then
+            ls -lh out/arch/arm64/boot/Image
+          else
+            echo "ERROR: Image tidak ditemukan."
+            exit 1
+          fi
+
+          echo ""
+          echo "Checking Image.gz..."
+
+          if [ -f out/arch/arm64/boot/Image.gz ]; then
+            ls -lh out/arch/arm64/boot/Image.gz
+          else
+            echo "WARNING: Image.gz tidak ditemukan."
+          fi
+
+      # ============================================================
+      # 14. CHECK FINAL CONFIG
+      # ============================================================
+      - name: Show final configuration
+        run: |
+          echo "=========================================="
+          echo "FINAL CONFIG"
+          echo "=========================================="
+
           grep -E \
-            "^CONFIG_KSU" \
+            'CONFIG_KSU|CONFIG_KPROBES|CONFIG_EXT4_FS' \
             out/.config || true
 
-      - name: Upload Build Log
+      # ============================================================
+      # 15. GENERATE SHA256
+      # ============================================================
+      - name: Generate checksums
+        run: |
+          set -e
+
+          mkdir -p artifacts
+
+          cp out/arch/arm64/boot/Image \
+            artifacts/Image
+
+          if [ -f out/arch/arm64/boot/Image.gz ]; then
+            cp out/arch/arm64/boot/Image.gz \
+              artifacts/Image.gz
+          fi
+
+          find out/arch/arm64/boot \
+            -type f \
+            \( -name "*.dtb" -o -name "*.dtbo" \) \
+            -exec cp --parents {} artifacts/ \; \
+            || true
+
+          cp out/.config artifacts/kernel.config
+
+          cp build.log artifacts/build.log
+
+          cd artifacts
+
+          sha256sum \
+            Image \
+            Image.gz \
+            kernel.config \
+            2>/dev/null \
+            | tee SHA256SUMS.txt
+
+      # ============================================================
+      # 16. UPLOAD ARTIFACTS
+      # ============================================================
+      - name: Upload kernel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: POCO-F5-Marble-BakaSU-Kernel
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 7
+
+      # ============================================================
+      # 17. UPLOAD FULL BUILD LOG
+      # ============================================================
+      - name: Upload build logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: bakasu-build-log
-          path: build.log
-          if-no-files-found: ignore
-
-      - name: Upload Kernel
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: marble-bakasu-test
+          name: POCO-F5-Marble-BakaSU-Build-Logs
           path: |
-            out/arch/arm64/boot/Image
-            out/arch/arm64/boot/Image.gz
-            out/arch/arm64/boot/dts/**/*.dtb
-            out/arch/arm64/boot/dts/**/*.dtbo
+            build.log
             out/.config
           if-no-files-found: warn
+          retention-days: 7
