@@ -32,12 +32,12 @@ jobs:
     timeout-minutes: 120
 
     steps:
-      - name: 🧹 1. Bersihkan Disk Runner & Install Senjata Kompilasi
+      - name: 🧹 1. Bersihkan Disk Runner & Install Senjata Kompilasi (+Aria2c)
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           sudo apt-get update -y
           sudo apt-get install -y --no-install-recommends \
-            bc bison build-essential ccache curl device-tree-compiler \
+            aria2 bc bison build-essential ccache curl device-tree-compiler \
             flex git libelf-dev libssl-dev libncurses5-dev lz4 \
             python3 python-is-python3 rsync unzip wget xz-utils zip zstd
 
@@ -49,22 +49,33 @@ jobs:
           echo "=== INFO COMMIT TERAKHIR SOURCE PZQQT ==="
           git log -1
 
-      - name: ⚡ 3. Download Toolchain ZyC Clang/LLVM Terbaru (Full ThinLTO Speed)
+      - name: ⚡ 3. Download Toolchain ZyC Clang/LLVM Terbaru (Anti-Limit + Aria2c Turbo)
         run: |
           mkdir -p clang
-          CLANG_URL=$(curl -s https://api.github.com/repos/ZyCromerZ/Clang/releases/latest | grep "browser_download_url.*tar.gz" | cut -d '"' -f 4 | head -n 1)
+          # Bypass API Rate Limit: Ambil link langsung dari Clang-main-link.txt (Clang 23.0.0git)
+          CLANG_URL=$(curl -fsSL "https://raw.githubusercontent.com/ZyCromerZ/Clang/refs/heads/main/Clang-main-link.txt" | tr -d '\r\n')
+
+          # Jaring pengaman kedua menggunakan autentikasi GITHUB_TOKEN resmi
+          if [ -z "$CLANG_URL" ]; then
+            CLANG_URL=$(curl -fsSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              https://api.github.com/repos/ZyCromerZ/Clang/releases/latest | grep "browser_download_url.*tar.gz" | cut -d '"' -f 4 | head -n 1)
+          fi
+
           echo "Mengunduh Toolchain dari: $CLANG_URL"
-          wget -q --show-progress "$CLANG_URL" -O clang.tar.gz
+          aria2c -x16 -s16 --console-log-level=warn "$CLANG_URL" -o clang.tar.gz
           tar -xzf clang.tar.gz -C clang
           rm clang.tar.gz
+          ./clang/bin/clang --version
 
-      - name: 🗂️ 4. Aktifkan CCACHE (Biar Compile Selanjutnya Ngebut Parah)
+      - name: 🗂️ 4. Aktifkan CCACHE (Sedot Cache Lama Biar Ngebut)
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: marble-ultimate-ccache-${{ github.event.inputs.kernel_branch }}-${{ github.sha }}
+          key: marble-ccache-${{ github.event.inputs.kernel_branch }}-${{ github.run_id }}
           restore-keys: |
+            marble-ccache-${{ github.event.inputs.kernel_branch }}-
             marble-ultimate-ccache-${{ github.event.inputs.kernel_branch }}-
+            marble-ccache-
             marble-ultimate-ccache-
 
       - name: 🥷 5. Suntik KernelSU-Next + SuSFS + Verifikasi Inline Hook Murni
@@ -95,11 +106,9 @@ jobs:
           echo "--> [4/4] Menerapkan Patch SuSFS + Inline Hooks ke Kernel 5.10..."
           patch -p1 --forward < ../susfs4ksu/kernel_patches/50_add_susfs_in_kernel-5.10.patch || true
 
-          # Bersihkan file .rej jika ada agar tidak mengganggu build system
           echo "Daftar file .rej (jika ada):"
           find . -name "*.rej" -print -delete || true
 
-          # SMART CHECK: Pastikan 4 file syscall utama sudah memiliki hook KSU/SuSFS
           HOOK_OK=true
           for f in fs/exec.c fs/open.c fs/read_write.c fs/stat.c; do
             if ! grep -q -E "ksu_handle_|susfs_" "$f"; then
@@ -116,7 +125,6 @@ jobs:
           cd kernel
           export PATH="${GITHUB_WORKSPACE}/clang/bin:${PATH}"
 
-          # Deteksi otomatis defconfig marble di branch Pzqqt
           if [ -f "arch/arm64/configs/marble_defconfig" ]; then
             DEFCONFIG_TARGET="marble_defconfig"
           elif [ -f "arch/arm64/configs/vendor/marble_GKI.config" ]; then
@@ -127,8 +135,6 @@ jobs:
           echo "Menggunakan Defconfig: $DEFCONFIG_TARGET"
 
           make O=out ARCH=arm64 SUBARCH=arm64 LLVM=1 LLVM_IAS=1 $DEFCONFIG_TARGET
-
-          echo "--> Menyuntikkan Parameter Rata Kanan via scripts/config..."
 
           # [1] Identitas Kernel Siluman
           ./scripts/config --file out/.config \
@@ -231,11 +237,17 @@ jobs:
 
           make O=out ARCH=arm64 SUBARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
 
-      - name: 🔥 7. Compile Kernel Image (Gaspol Semua Core CPU)
+      - name: 🔥 7. Compile Kernel Image (Gaspol Semua Core + Turbo CCACHE)
         run: |
           cd kernel
           export PATH="/usr/lib/ccache:${GITHUB_WORKSPACE}/clang/bin:${PATH}"
           export CCACHE_DIR="${HOME}/.ccache"
+          export CCACHE_SLOPPINESS="file_macro,locale,time_macros"
+          export CCACHE_NOHASHDIR="true"
+          export KBUILD_BUILD_TIMESTAMP="Thu Oct 15 00:00:00 UTC 2026"
+          export KBUILD_BUILD_USER="Fauzi"
+          export KBUILD_BUILD_HOST="RataKanan-Lab"
+
           ccache -M 5G
           ccache -z
 
@@ -258,23 +270,19 @@ jobs:
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
           rm -rf AnyKernel3/.git AnyKernel3/README.md
 
-          # Setel AnyKernel3 khusus untuk POCO F5 / Redmi Note 12 Turbo (marble)
           sed -i 's/device.name1=.*/device.name1=marble/' AnyKernel3/anykernel.sh
           sed -i 's/device.name2=.*/device.name2=marblein/' AnyKernel3/anykernel.sh
           sed -i 's/BLOCK=.*/BLOCK=auto;/' AnyKernel3/anykernel.sh
           sed -i 's/IS_SLOT_DEVICE=.*/IS_SLOT_DEVICE=1;/' AnyKernel3/anykernel.sh
 
-          # Salin hasil compile Image.gz / Image
           if [ -f "kernel/out/arch/arm64/boot/Image.gz" ]; then
             cp kernel/out/arch/arm64/boot/Image.gz AnyKernel3/
           else
             cp kernel/out/arch/arm64/boot/Image AnyKernel3/
           fi
 
-          # Buat Script Runtime Otomatis (99_marble_ratakanan.sh)
           cat << 'EOF' > AnyKernel3/99_marble_ratakanan.sh
           #!/system/bin/sh
-          # Tunggu sampai Android selesai booting penuh
           while [ "$(getprop sys.boot_completed)" != "1" ]; do
               sleep 2
           done
@@ -292,7 +300,7 @@ jobs:
           sysctl -w net.ipv4.tcp_rmem="4096 87380 16777216"
           sysctl -w net.ipv4.tcp_wmem="4096 65536 16777216"
 
-          # 3. Aktifkan I/O Scheduler ADIOS / CPQ (Jika tersedia di block device)
+          # 3. Aktifkan I/O Scheduler ADIOS / CPQ
           for queue in /sys/block/sd*/queue/scheduler /sys/block/mmcblk*/queue/scheduler; do
               if [ -f "$queue" ]; then
                   if grep -q "adios" "$queue"; then
@@ -303,7 +311,7 @@ jobs:
               fi
           done
 
-          # 4. Blokir Wakelock Penyedot Baterai via Boeffla Wakelock Blocker Bawaan Pzqqt
+          # 4. Blokir Wakelock Penyedot Baterai via Boeffla Wakelock Blocker
           if [ -f "/sys/class/misc/boeffla_wakelock_blocker/wakelock_blocker" ]; then
               echo "qcom_rx_wakelock;wlan_pno_wl;wlan_extscan_wl;ipa_client_apps_wan_cons;NETLINK" > /sys/class/misc/boeffla_wakelock_blocker/wakelock_blocker 2>/dev/null
           fi
@@ -312,7 +320,6 @@ jobs:
           sysctl -w kernel.printk="0 0 0 0"
           EOF
 
-          # Suntikkan perintah Auto-Install ke dalam anykernel.sh agar otomatis terpasang saat Flash ZIP!
           cat << 'EOF' >> AnyKernel3/anykernel.sh
 
           # === AUTO-INSTALL RATA KANAN SERVICE SCRIPT ===
