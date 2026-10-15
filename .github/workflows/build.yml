@@ -1,384 +1,272 @@
-name: Build Custom Kernel (Marble + KSU Next)
+name: 🔥 Build Melt-RataKanan POCO F5 (KSU-Next + SuSFS)
 
 on:
   workflow_dispatch:
     inputs:
-      kernel_repo:
-        description: "URL repo source kernel"
-        default: "https://github.com/Pzqqt/android_kernel_xiaomi_marble.git"
       kernel_branch:
-        description: "Branch kernel (kosongin = default branch repo, JANGAN ada spasi)"
-        default: ""
-      defconfig:
-        description: "Nama file defconfig (dicari otomatis di arch/arm64/configs)"
-        default: "marble_defconfig"
-      enable_susfs:
-        description: "Aktifin SuSFS? (run pertama matiin dulu buat tes build polos)"
-        type: boolean
-        default: true
-      susfs_branch:
-        description: "Branch susfs4ksu (harus cocok sama versi kernel)"
-        default: "gki-android12-5.10"
-      enable_nethunter_wifi:
-        description: "EKSPERIMENTAL: coba patch monitor mode WiFi (qcacld). Injection TIDAK dijamin."
-        type: boolean
-        default: true
-      enable_tweaks:
-        description: "Tambah CPU governor, TCP BBR, USB HID gadget (buat HID attack), Bluetooth config"
-        type: boolean
-        default: true
-      enable_rtl8188eus:
-        description: "Build driver RTL8188EUS (buat adapter eksternal TP-Link TL-WN722N v2/v3) - monitor mode + injection"
-        type: boolean
-        default: true
-      root_solution:
-        description: "Root solution yang diintegrasi ke kernel"
+        description: 'Branch Source Pzqqt (melt-rebase atau bouquet)'
+        required: true
+        default: 'melt-rebase'
         type: choice
         options:
-          - bakasu
-          - ksu-next
-        default: bakasu
-      bakasu_branch:
-        description: "Branch BakaSU (dipakai kalau root_solution=bakasu)"
-        default: "main"
+          - melt-rebase
+          - bouquet
+          - bouquet_ci
+      ksu_branch:
+        description: 'Branch KernelSU-Next (next = Stabil, dev = Eksperimental)'
+        required: true
+        default: 'next'
+        type: choice
+        options:
+          - next
+          - dev
+      enable_susfs:
+        description: 'Integrasikan Patch SuSFS (gki-android12-5.10)?'
+        required: true
+        default: true
+        type: boolean
 
 jobs:
-  build-kernel:
+  build-marble-kernel:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
-    defaults:
-      run:
-        shell: bash   # otomatis pakai -e -o pipefail
-    env:
-      ZIP_NAME: Marble-${{ inputs.root_solution }}-${{ github.run_number }}.zip
+    timeout-minutes: 120
 
     steps:
-      - name: Setup environment
+      - name: 🛠️ 1. Maksimalkan Ruang Disk Runner & Pasang Dependensi
         run: |
-          sudo apt-get update
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo apt-get update -y
           sudo apt-get install -y --no-install-recommends \
-            git bc bison flex make zip curl cpio rsync xz-utils lz4 lzop \
-            libssl-dev libelf-dev libncurses-dev device-tree-compiler python3 \
-            clang lld llvm gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
-          clang --version | head -n1
+            bc bison build-essential ccache curl device-tree-compiler \
+            flex git libelf-dev libssl-dev libncurses5-dev lz4 \
+            python3 python-is-python3 rsync unzip wget xz-utils zip zstd
 
-      - name: Clone kernel source
-        env:
-          KERNEL_REPO: ${{ inputs.kernel_repo }}
-          KERNEL_BRANCH: ${{ inputs.kernel_branch }}
+      - name: 📥 2. Clone Source Pzqqt (android_kernel_xiaomi_marble)
         run: |
-          if [ -n "$KERNEL_BRANCH" ]; then
-            git clone --depth=1 -b "$KERNEL_BRANCH" "$KERNEL_REPO" kernel-source
-          else
-            git clone --depth=1 "$KERNEL_REPO" kernel-source
-          fi
+          git clone --depth=1 -b ${{ github.event.inputs.kernel_branch }} \
+            https://github.com/Pzqqt/android_kernel_xiaomi_marble.git kernel
+          cd kernel
+          echo "Commit Terakhir:"
+          git log -1 --oneline
 
-      - name: Diagnosa source kernel
-        working-directory: kernel-source
+      - name: ⚡ 3. Download Toolchain Clang/LLVM Terbaru (ZyC / Slim LLVM)
         run: |
-          echo "=== Versi kernel ==="
-          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL|EXTRAVERSION) ' Makefile || true
-          git log -1 --format='%h %s (%cd)' || true
-          echo "=== Branch yang ada di repo ==="
-          git ls-remote --heads origin | sed 's|.*refs/heads/||' | head -n 30 || true
-          echo "=== Source ini UDAH ada SuSFS / KSU belum? ==="
-          grep -rIl -i susfs --exclude-dir=.git --include='*.c' --include='*.h' --include='Kconfig' --include='Makefile' . | head -n 15 || true
-          ls -d drivers/kernelsu* 2>/dev/null || echo "(gak ada drivers/kernelsu)"
-          grep -rIl 'ksu_handle' --exclude-dir=.git fs kernel drivers/input | head -n 10 || true
-          echo "=== Lokasi defconfig marble ==="
-          find arch/arm64/configs -name '*marble*'
-          echo "=== Driver WiFi (qcacld) ada di mana? ==="
-          find . -maxdepth 3 -iname '*wlan*' -o -iname '*qcacld*' 2>/dev/null | grep -v '^\./\.git' | head -n 10
-          WLAN_DIR=$(find . -maxdepth 4 -type d -iname 'qcacld*' 2>/dev/null | head -n1)
-          echo "WLAN_DIR terdeteksi: ${WLAN_DIR:-(gak ketemu, berarti driver WiFi binary/di luar tree)}"
-          echo "=== Sudah ada hook monitor mode (con_mode) belum? ==="
-          grep -rIl 'con_mode' --include='*.c' . 2>/dev/null | head -n 5 || echo "(belum ada, berarti perlu dipatch manual)"
-          echo "=== USB gadget / HID tersedia gak di Kconfig ==="
-          grep -rl 'USB_CONFIGFS_F_HID\|USB_CONFIGFS' drivers/usb/gadget/Kconfig 2>/dev/null || echo "(Kconfig gadget gak ketemu di lokasi biasa)"
-          echo "=== Bluetooth Kconfig ==="
-          test -f net/bluetooth/Kconfig && echo "net/bluetooth/Kconfig ada" || echo "net/bluetooth/Kconfig gak ketemu"
+          mkdir -p clang
+          # Mengambil rilis Clang 20/21+ terbaru dari ZyCromerZ untuk optimasi LTO penuh
+          CLANG_URL=$(curl -s https://api.github.com/repos/ZyCromerZ/Clang/releases/latest | grep "browser_download_url.*tar.gz" | cut -d '"' -f 4 | head -n 1)
+          wget -q --show-progress "$CLANG_URL" -O clang.tar.gz
+          tar -xzf clang.tar.gz -C clang
+          rm clang.tar.gz
 
-      - name: Integrasi root solution (BakaSU / KSU Next)
-        working-directory: kernel-source
-        env:
-          ENABLE_SUSFS: ${{ inputs.enable_susfs }}
-          ROOT_SOLUTION: ${{ inputs.root_solution }}
-          BAKASU_BRANCH: ${{ inputs.bakasu_branch }}
+      - name: 🗂️ 4. Setup Cache Kompilasi (ccache) Biar Build Kedua Ngebut
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: marble-ccache-${{ github.event.inputs.kernel_branch }}-${{ github.sha }}
+          restore-keys: |
+            marble-ccache-${{ github.event.inputs.kernel_branch }}-
+            marble-ccache-
+
+      - name: 🥷 5. Sapu Bersih KSU Lama & Suntik KernelSU-Next + SuSFS
         run: |
-          # setup.sh: clone source root solution, bikin symlink drivers/kernelsu,
-          # dan otomatis nambah entry ke drivers/Makefile + drivers/Kconfig
-          if [ "$ROOT_SOLUTION" = "bakasu" ]; then
-            # BakaSU (dulu ReSukiSU) - turunan KernelSU, katanya udah native SuSFS.
-            # Belum pernah dicoba di proyek ini, jadi nama branch masih tebakan terbaik
-            # (ikutin pola repo serumpun kayak SukiSU-Ultra yang pakai "main").
-            SETUP_URL="https://raw.githubusercontent.com/Baka-SU/BakaSU/$BAKASU_BRANCH/kernel/setup.sh"
-            KSU_REF="$BAKASU_BRANCH"
-          elif [ "$ENABLE_SUSFS" = "true" ]; then
-            # KSU Next yang udah bawa glue SuSFS sekarang ada di fork pershoot (branch dev-susfs).
-            # Branch lama "next-susfs" di repo KernelSU-Next resmi udah 404, itu penyebab error sebelumnya.
-            # Karena udah bawa SuSFS, patch 10_enable_susfs_for_ksu GAK dipakai.
-            SETUP_URL="https://raw.githubusercontent.com/pershoot/KernelSU-Next/dev-susfs/kernel/setup.sh"
-            KSU_REF="dev-susfs"
-          else
-            SETUP_URL="https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh"
-            KSU_REF="dev"
-          fi
-          echo "Pakai root solution: $ROOT_SOLUTION, URL: $SETUP_URL"
-          # -f = kalau 404 langsung gagal, dengan pesan jelas, bukan nyoba jalanin halaman error-nya
-          if ! curl -fLsS "$SETUP_URL" -o setup.sh; then
-            echo "::error::setup.sh gak ketemu di $SETUP_URL - kemungkinan nama branch '$KSU_REF' salah. Cek branch yang ada di https://github.com/Baka-SU/BakaSU/branches lalu ganti input bakasu_branch."
-            exit 1
-          fi
-          bash setup.sh "$KSU_REF"
-          rm -f setup.sh
-          test -e drivers/kernelsu/Kconfig || { echo "::error::$ROOT_SOLUTION gagal terintegrasi (drivers/kernelsu gak kebentuk)"; exit 1; }
-          grep -n kernelsu drivers/Makefile drivers/Kconfig
-          echo "=== Config symbol yang disediain (buat jaga-jaga beda nama sama CONFIG_KSU biasa) ==="
-          grep -rhoE 'config [A-Z_]+' drivers/kernelsu/Kconfig | sort -u
+          cd kernel
 
-      - name: Patch SuSFS ke kernel
-        if: ${{ inputs.enable_susfs }}
-        working-directory: kernel-source
-        env:
-          SUSFS_BRANCH: ${{ inputs.susfs_branch }}
-        run: |
-          git clone --depth=1 -b "$SUSFS_BRANCH" https://gitlab.com/simonpunk/susfs4ksu.git ../susfs4ksu
-          PATCH=$(ls ../susfs4ksu/kernel_patches/50_add_susfs_in_*.patch | head -n1)
-          echo "Pakai patch: $PATCH"
+          echo "--> Membersihkan sisa KernelSU bawaan repo Pzqqt (jika ada)..."
+          rm -rf KernelSU KernelSU-Next drivers/kernelsu
+          sed -i '/kernelsu/d' drivers/Makefile || true
+          sed -i '/kernelsu/d' drivers/Kconfig || true
 
-          # tes dulu tanpa nyentuh file; kalau ada hunk gagal, langsung stop (gak ditutupin lagi)
-          if ! patch -p1 --dry-run --forward < "$PATCH" > /tmp/dryrun.log 2>&1; then
-            echo "=== RINGKASAN: file yang gagal di-patch ==="
-            awk '/^checking file/{f=$3} /out of .* hunks? FAILED/{print f": "$0}' /tmp/dryrun.log
-            echo "=== Jumlah hunk yang kebaca 'udah ke-patch' (tanda source udah ada SuSFS) ==="
-            grep -c -i "previously applied" /tmp/dryrun.log || true
-            echo "::error::Patch SuSFS gak cocok sama source kernel ini (lihat ringkasan di atas)."
-            exit 1
-          fi
-          patch -p1 --forward --no-backup-if-mismatch < "$PATCH"
-          find . -name '*.rej' | grep . && exit 1 || true
+          echo "--> Menyuntikkan KernelSU-Next branch: ${{ github.event.inputs.ksu_branch }}..."
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/${{ github.event.inputs.ksu_branch }}/kernel/setup.sh" | bash -s ${{ github.event.inputs.ksu_branch }}
 
-          # SuSFS versi baru nyimpen susfs.c / susfs.h di folder terpisah (bukan di dalam patch).
-          # cp -n = gak nimpa kalau file-nya ternyata udah dibuat sama patch.
-          SRC=../susfs4ksu/kernel_patches
-          if [ -d "$SRC/fs" ]; then cp -rn "$SRC/fs/." fs/; fi
-          if [ -d "$SRC/include/linux" ]; then cp -rn "$SRC/include/linux/." include/linux/; fi
-          test -f include/linux/susfs.h || { echo "::error::susfs.h gak ada setelah patch"; exit 1; }
+          if [ "${{ github.event.inputs.enable_susfs }}" = "true" ]; then
+            echo "--> Mengunduh SuSFS khusus GKI Android 12 - 5.10..."
+            git clone --depth=1 -b gki-android12-5.10 https://gitlab.com/simonpunk/susfs4ksu.git ../susfs4ksu
 
-      - name: Patch NetHunter WiFi (monitor mode, eksperimental)
-        if: ${{ inputs.enable_nethunter_wifi }}
-        working-directory: kernel-source
-        run: |
-          # Sumber: kimocoder/qualcomm_android_monitor_mode (patch dipakai NetHunter resmi
-          # buat QCACLD-3.0). Catatan dari pembuatnya: banyak kernel vendor baru udah
-          # punya ini built-in, jadi patch bisa aja "udah diterapkan" / gak relevan.
-          # Frame injection TIDAK termasuk di patch ini - itu riset terpisah per-chip,
-          # belum ada yang konfirmasi jalan di marble. Jangan dijanjiin ke user.
-          curl -fLsS -o monitor_mode.patch \
-            https://github.com/kimocoder/qualcomm_android_monitor_mode/raw/master/files/enable_monitor_mode.patch
+            echo "--> Menyalin file core SuSFS ke dalam tree kernel..."
+            cp -rv ../susfs4ksu/kernel_patches/fs/* ./fs/
+            cp -rv ../susfs4ksu/kernel_patches/include/linux/* ./include/linux/
 
-          if patch -p1 --dry-run --forward < monitor_mode.patch > /tmp/wifi_dryrun.log 2>&1; then
-            patch -p1 --forward --no-backup-if-mismatch < monitor_mode.patch
-            echo "=== Patch monitor mode BERHASIL ditempel ==="
-          else
-            echo "=== Patch gak nempel bersih (lihat ringkasan) ==="
-            awk '/^checking file/{f=$3} /out of .* hunks? FAILED/{print f": "$0}' /tmp/wifi_dryrun.log
-            if grep -qi "previously applied" /tmp/wifi_dryrun.log; then
-              echo "::notice::Kemungkinan monitor mode SUDAH built-in di source ini (sesuai catatan kimocoder). Lanjut tanpa patch."
-            else
-              echo "::warning::Patch monitor mode gak cocok sama source ini. Build tetap lanjut TANPA patch ini - cek manual nanti lewat 'echo 4 > /sys/module/wlan/parameters/con_mode' setelah boot."
+            echo "--> Menerapkan patch SuSFS ke KernelSU-Next..."
+            if [ -d "KernelSU-Next" ]; then
+              cd KernelSU-Next
+            elif [ -d "KernelSU" ]; then
+              cd KernelSU
             fi
-          fi
-          rm -f monitor_mode.patch
+            patch -p1 --forward < ../../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || true
+            cd ..
 
-      - name: Tambah tweak (governor, TCP, USB HID, Bluetooth)
-        if: ${{ inputs.enable_tweaks }}
-        working-directory: kernel-source
-        env:
-          DEFCONFIG: ${{ inputs.defconfig }}
-        run: |
-          DEF_PATH=$(find arch/arm64/configs -name "$DEFCONFIG" | head -n1)
-          test -n "$DEF_PATH" || { echo "::error::defconfig belum ketemu buat ditambah tweak"; exit 1; }
-
-          {
-            echo ""
-            echo "# --- Tweak tambahan ---"
-            # CPU governor: nyalain semua governor umum, biar bisa gonta-ganti runtime
-            # lewat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor (gak ngubah default)
-            echo "CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y"
-            echo "CONFIG_CPU_FREQ_GOV_PERFORMANCE=y"
-            echo "CONFIG_CPU_FREQ_GOV_POWERSAVE=y"
-            echo "CONFIG_CPU_FREQ_GOV_USERSPACE=y"
-            echo "CONFIG_CPU_FREQ_GOV_CONSERVATIVE=y"
-            echo "CONFIG_CPU_FREQ_GOV_ONDEMAND=y"
-            # TCP congestion control tambahan (default tetap apa pun yang dipilih kernel,
-            # tinggal ganti runtime: sysctl net.ipv4.tcp_congestion_control=bbr)
-            echo "CONFIG_TCP_CONG_ADVANCED=y"
-            echo "CONFIG_TCP_CONG_BBR=y"
-            echo "CONFIG_TCP_CONG_WESTWOOD=y"
-            echo "CONFIG_TCP_CONG_HTCP=y"
-            echo "CONFIG_DEFAULT_BBR=y"
-            # USB gadget HID: dasar buat serangan HID/BadUSB (keystroke injection via USB)
-            echo "CONFIG_USB_CONFIGFS=y"
-            echo "CONFIG_USB_CONFIGFS_F_HID=y"
-            echo "CONFIG_HID=y"
-            # Bluetooth: pastiin subsistem inti nyala (chip BT biasanya udah didukung vendor)
-            echo "CONFIG_BT=y"
-            echo "CONFIG_BT_HCIUART=y"
-          } >> "$DEF_PATH"
-
-      - name: Siapin defconfig
-        working-directory: kernel-source
-        env:
-          DEFCONFIG: ${{ inputs.defconfig }}
-          ENABLE_SUSFS: ${{ inputs.enable_susfs }}
-        run: |
-          DEF_PATH=$(find arch/arm64/configs -name "$DEFCONFIG" | head -n1)
-          if [ -z "$DEF_PATH" ]; then
-            echo "::error::defconfig $DEFCONFIG gak ketemu. Isi folder configs:"
-            find arch/arm64/configs -name '*marble*'
-            exit 1
-          fi
-          echo "DEFCONFIG_REL=${DEF_PATH#arch/arm64/configs/}" >> "$GITHUB_ENV"
-
-          # tanpa ini KSU gak ikut ke-compile sama sekali
-          {
-            echo ""
-            echo "CONFIG_KSU=y"
-          } >> "$DEF_PATH"
-          if [ "$ENABLE_SUSFS" = "true" ]; then
-            echo "CONFIG_KSU_SUSFS=y" >> "$DEF_PATH"
+            echo "--> Menerapkan patch SuSFS ke Kernel 5.10..."
+            patch -p1 --forward < ../susfs4ksu/kernel_patches/50_add_susfs_in_kernel-5.10.patch || true
           fi
 
-      - name: Compile kernel
-        working-directory: kernel-source
-        env:
-          ENABLE_SUSFS: ${{ inputs.enable_susfs }}
+      - name: ⚙️ 6. Racik Defconfig "Rata Kanan" (Performa, Baterai, TCP BBR, Sinyal & KSU)
         run: |
-          # CC harus lewat argumen make (export CC=clang di-override sama Makefile kernel)
-          MAKE_ARGS=(
-            O=out ARCH=arm64
-            LLVM=1 LLVM_IAS=1
-            CROSS_COMPILE=aarch64-linux-gnu-
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-            CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
-            KCFLAGS=-Wno-error   # clang baru sering protes warning di source lama
-          )
+          cd kernel
+          export PATH="${GITHUB_WORKSPACE}/clang/bin:${PATH}"
 
-          make "${MAKE_ARGS[@]}" "$DEFCONFIG_REL"
-          make "${MAKE_ARGS[@]}" olddefconfig
-
-          echo "=== Cek config KSU ==="
-          grep -E "^CONFIG_KSU" out/.config || true
-          grep -q "^CONFIG_KSU=y" out/.config || { echo "::error::CONFIG_KSU gak aktif di .config"; exit 1; }
-          if [ "$ENABLE_SUSFS" = "true" ]; then
-            grep -q "^CONFIG_KSU_SUSFS=y" out/.config || { echo "::error::CONFIG_KSU_SUSFS gak aktif (versi KSU Next & SuSFS mungkin gak cocok)"; exit 1; }
-          fi
-
-          echo "=== Status tweak (info aja, gak bikin build gagal kalau ada yang 'n') ==="
-          grep -E "^CONFIG_(CPU_FREQ_GOV_|TCP_CONG_|DEFAULT_BBR|USB_CONFIGFS|HID=|BT=|BT_HCIUART)" out/.config || echo "(gak ada satu pun, mungkin enable_tweaks dimatiin atau nama config beda di kernel ini)"
-
-          # cuma bangun Image (cukup buat AnyKernel3). Tambahin 'dtbs' di belakang kalau butuh dtb
-          make -j"$(nproc)" "${MAKE_ARGS[@]}" Image 2>&1 | tee build.log
-
-          # siapin Module.symvers dkk biar module di luar tree (rtl8188eus) bisa nebeng build ini
-          make "${MAKE_ARGS[@]}" modules_prepare
-
-      - name: Build driver RTL8188EUS (adapter eksternal TP-Link)
-        if: ${{ inputs.enable_rtl8188eus }}
-        run: |
-          # Sumber: aircrack-ng/rtl8188eus - driver resmi komunitas aircrack-ng,
-          # satu-satunya yang monitor mode + injection-nya udah TERBUKTI jalan
-          # (beda sama chip WiFi internal yang masih tanda tanya / dikunci firmware).
-          # Dibuild sebagai module terpisah (.ko) di LUAR source kernel, numpang
-          # Module.symvers dari build Image di atas biar vermagic-nya COCOK persis
-          # sama kernel yang bakal diflash (kalau gak cocok, .ko gak mau ke-load).
-          git clone --depth=1 https://github.com/aircrack-ng/rtl8188eus.git rtl8188eus
-          cd rtl8188eus
-
-          # Sejak kernel ~5.9, filp_open/kernel_read dipindah ke "namespace" khusus
-          # yang cuma boleh dipake kode filesystem. Driver lama kayak gini belum
-          # declare izin pakenya, jadi ke-load tapi GAGAL di-insmod (bukan gagal compile).
-          # Fix umum dipake banyak driver sejenis (rtl8812au, 8814au) buat kernel 5.10+.
-          MLFILE=$(grep -rl '^MODULE_LICENSE' . --include='*.c' | head -n1)
-          if [ -n "$MLFILE" ]; then
-            if ! grep -q 'MODULE_IMPORT_NS' "$MLFILE"; then
-              sed -i '/^MODULE_LICENSE/a MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);' "$MLFILE"
-              echo "MODULE_IMPORT_NS ditambahin ke: $MLFILE"
-            fi
+          # Deteksi otomatis nama defconfig di branch Pzqqt
+          if [ -f "arch/arm64/configs/marble_defconfig" ]; then
+            DEFCONFIG_TARGET="marble_defconfig"
+          elif [ -f "arch/arm64/configs/vendor/marble_GKI.config" ]; then
+            DEFCONFIG_TARGET="gki_defconfig vendor/marble_GKI.config"
           else
-            echo "::warning::Gak ketemu file MODULE_LICENSE, fix namespace gak ditempel - insmod kemungkinan masih gagal."
+            DEFCONFIG_TARGET="gki_defconfig"
+          fi
+          echo "Target Defconfig Terdeteksi: $DEFCONFIG_TARGET"
+
+          make O=out ARCH=arm64 SUBARCH=arm64 LLVM=1 LLVM_IAS=1 $DEFCONFIG_TARGET
+
+          echo "--> Mengunci Konfigurasi Rata Kanan via scripts/config..."
+
+          # [A] Identitas Kernel Siluman
+          ./scripts/config --file out/.config \
+            --set-str CONFIG_LOCALVERSION "-Melt-RataKanan-KSU"
+
+          # [B] KernelSU-Next & SuSFS Configuration
+          ./scripts/config --file out/.config \
+            -e CONFIG_KSU \
+            -e CONFIG_KPROBES \
+            -e CONFIG_HAVE_KPROBES \
+            -e CONFIG_KPROBE_EVENTS
+
+          if [ "${{ github.event.inputs.enable_susfs }}" = "true" ]; then
+            ./scripts/config --file out/.config \
+              -e CONFIG_KSU_SUSFS \
+              -e CONFIG_KSU_SUSFS_SUS_PATH \
+              -e CONFIG_KSU_SUSFS_SUS_MOUNT \
+              -e CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT \
+              -e CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT \
+              -e CONFIG_KSU_SUSFS_SUS_KSTAT \
+              -e CONFIG_KSU_SUSFS_TRY_UMOUNT \
+              -e CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT \
+              -e CONFIG_KSU_SUSFS_SPOOF_UNAME \
+              -e CONFIG_KSU_SUSFS_OPEN_REDIRECT \
+              -d CONFIG_KSU_SUSFS_ENABLE_LOG \
+              -d CONFIG_KSU_SUSFS_SUS_SU
           fi
 
-          KDIR="$GITHUB_WORKSPACE/kernel-source/out"
-          # KCFLAGS=-Wno-error: source driver ini lama, masih gaya nulis if((x))
-          # yang dianggap error (bukan cuma warning) sama clang baru. Sama kayak
-          # perlakuan kernel utama di step Compile kernel.
-          if ! make -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 \
-                CROSS_COMPILE=aarch64-linux-gnu- KSRC="$KDIR" \
-                KCFLAGS=-Wno-error \
-                > /tmp/rtl8188eus_build.log 2>&1; then
-            echo "=== Build driver RTL8188EUS GAGAL, 30 baris error terakhir: ==="
-            tail -n 30 /tmp/rtl8188eus_build.log
-            echo "::warning::Driver RTL8188EUS gagal dibuild. Kernel utama TETAP lanjut tanpa ini - adapter eksternal belum bisa dipakai, tapi gak ngaruh ke kernel/KSU/SuSFS."
-            exit 0
-          fi
+          # [C] Upgrade TCP BBR + Fair Queue (FQ) Default & Bypass Tethering/TTL
+          ./scripts/config --file out/.config \
+            -e CONFIG_TCP_CONG_ADVANCED \
+            -e CONFIG_TCP_CONG_BBR \
+            -e CONFIG_DEFAULT_BBR \
+            --set-str CONFIG_DEFAULT_TCP_CONG "bbr" \
+            -e CONFIG_NET_SCHED \
+            -e CONFIG_NET_SCH_FQ \
+            -e CONFIG_DEFAULT_FQ \
+            --set-str CONFIG_DEFAULT_NET_SCH "fq" \
+            -e CONFIG_NETFILTER_XT_TARGET_HL \
+            -e CONFIG_IP_NF_TARGET_TTL \
+            -e CONFIG_IP6_NF_TARGET_HL \
+            -e CONFIG_IP_SET
 
-          KO=$(find . -name '8188eu.ko' | head -n1)
-          if [ -z "$KO" ]; then
-            echo "::warning::Build 'sukses' tapi 8188eu.ko gak ketemu - cek log build manual."
-            exit 0
-          fi
-          mkdir -p "$GITHUB_WORKSPACE/out-extra"
-          cp "$KO" "$GITHUB_WORKSPACE/out-extra/8188eu.ko"
-          echo "=== Driver RTL8188EUS berhasil dibuild ==="
-          ls -la "$GITHUB_WORKSPACE/out-extra/8188eu.ko"
-          modinfo "$GITHUB_WORKSPACE/out-extra/8188eu.ko" 2>/dev/null | grep -E 'vermagic|description|import_ns' || true
+          # [D] Penguatan Jalur Modem/Sinyal/GPS (Pangkas Overhead QMI/IPA/RMNET)
+          ./scripts/config --file out/.config \
+            -e CONFIG_RMNET_PERF \
+            -e CONFIG_RMNET_SHS \
+            -d CONFIG_IPA_DEBUG \
+            -d CONFIG_IPC_LOGGING \
+            -d CONFIG_QCOM_RTB \
+            -e CONFIG_BOEFFLA_WL_BLOCKER
 
-      - name: Bungkus pakai AnyKernel3
+          # [E] Performa Rata Kanan & Efisiensi Baterai (MGLRU + 300Hz + ThinLTO)
+          # Catatan Penting: Matikan CONFIG_KSHRINK_LRUVECD agar tidak bentrok dengan MGLRU!
+          ./scripts/config --file out/.config \
+            -e CONFIG_LTO_CLANG_THIN \
+            -e CONFIG_HZ_300 \
+            --set-val CONFIG_HZ 300 \
+            -e CONFIG_WQ_POWER_EFFICIENT_DEFAULT \
+            -e CONFIG_LRU_GEN \
+            -e CONFIG_LRU_GEN_ENABLED \
+            -d CONFIG_KSHRINK_LRUVECD \
+            -e CONFIG_CRYPTO_LZ4 \
+            -e CONFIG_CRYPTO_ZSTD
+
+          # [F] Diet Sampah Kernel (Matikan Debugging & Tracing Berat)
+          ./scripts/config --file out/.config \
+            -d CONFIG_AUDIT \
+            -d CONFIG_DEBUG_FS \
+            -d CONFIG_CORESIGHT \
+            -d CONFIG_PAGE_OWNER \
+            -d CONFIG_DEBUG_PAGEALLOC \
+            -d CONFIG_SLUB_DEBUG \
+            -d CONFIG_PRINTK_TIME
+
+          # Sinkronisasi ulang .config
+          make O=out ARCH=arm64 SUBARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
+
+      - name: 🔥 7. Compile Kernel Image & Modules (Full Core Speed)
         run: |
-          IMG=kernel-source/out/arch/arm64/boot/Image
-          test -f "$IMG" || { echo "::error::Image gak kebentuk"; exit 1; }
+          cd kernel
+          export PATH="/usr/lib/ccache:${GITHUB_WORKSPACE}/clang/bin:${PATH}"
+          export CCACHE_DIR="${HOME}/.ccache"
+          ccache -M 5G
+          ccache -z
 
+          make -j$(nproc --all) \
+            O=out \
+            ARCH=arm64 \
+            SUBARCH=arm64 \
+            CC="ccache clang" \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            Image Image.gz
+
+          ccache -s
+
+      - name: 📦 8. Bungkus ke AnyKernel3 + Suntik Script Tweak GPS & TCP BBR
+        run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
-          cp "$IMG" AnyKernel3/Image
+          rm -rf AnyKernel3/.git AnyKernel3/README.md
+
+          # Sesuaikan anykernel.sh untuk POCO F5 / Redmi Note 12 Turbo (marble)
+          sed -i 's/device.name1=.*/device.name1=marble/' AnyKernel3/anykernel.sh
+          sed -i 's/device.name2=.*/device.name2=marblein/' AnyKernel3/anykernel.sh
+          sed -i 's/BLOCK=.*/BLOCK=auto;/' AnyKernel3/anykernel.sh
+          sed -i 's/IS_SLOT_DEVICE=.*/IS_SLOT_DEVICE=1;/' AnyKernel3/anykernel.sh
+
+          # Salin Kernel Image hasil compile
+          if [ -f "kernel/out/arch/arm64/boot/Image.gz" ]; then
+            cp kernel/out/arch/arm64/boot/Image.gz AnyKernel3/
+          else
+            cp kernel/out/arch/arm64/boot/Image AnyKernel3/
+          fi
+
+          # Buat Script Pendamping KSU (99_marble_ratakanan.sh) di dalam paket zip
+          mkdir -p AnyKernel3/ksu_tweaks
+          cat << 'EOF' > AnyKernel3/ksu_tweaks/99_marble_ratakanan.sh
+          #!/system/bin/sh
+          while [ "$(getprop sys.boot_completed)" != "1" ]; do
+              sleep 2
+          done
+          # Kunci TCP BBR + Fair Queue + ECN + FastOpen
+          sysctl -w net.core.default_qdisc=fq
+          sysctl -w net.ipv4.tcp_congestion_control=bbr
+          sysctl -w net.ipv4.tcp_ecn=1
+          sysctl -w net.ipv4.tcp_fastopen=3
+          sysctl -w net.ipv4.tcp_tw_reuse=1
+          # Buffer Jaringan Rata Kanan
+          sysctl -w net.core.rmem_max=16777216
+          sysctl -w net.core.wmem_max=16777216
+          # Blokir Wakelock Liar Modem/WiFi via Boeffla Blocker bawaan Pzqqt
+          echo "qcom_rx_wakelock;wlan_pno_wl;wlan_extscan_wl;ipa_client_apps_wan_cons" > /sys/class/misc/boeffla_wakelock_blocker/wakelock_blocker 2>/dev/null
+          # Matikan Log Spam
+          sysctl -w kernel.printk="0 0 0 0"
+          EOF
+
           cd AnyKernel3
+          ZIP_NAME="Melt-RataKanan-Marble-${{ github.event.inputs.kernel_branch }}-KSU-Next-$(date +%Y%m%d-%H%M).zip"
+          zip -r9 "../${ZIP_NAME}" * -x "*.git*"
+          echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
 
-          # default AnyKernel3 isinya device 'maguro' -> kalau gak diganti, flash pasti ditolak
-          sed -i \
-            -e 's|^kernel.string=.*|kernel.string=Custom Kernel Marble (KSU Next)|' \
-            -e 's|^do.modules=.*|do.modules=0|' \
-            -e 's|^device.name1=.*|device.name1=marble|' \
-            -e 's|^device.name2=.*|device.name2=marblein|' \
-            -e 's|^device.name3=.*|device.name3=|' \
-            -e 's|^device.name4=.*|device.name4=|' \
-            -e 's|^device.name5=.*|device.name5=|' \
-            -e 's|^BLOCK=.*|BLOCK=boot;|' \
-            -e 's|^IS_SLOT_DEVICE=.*|IS_SLOT_DEVICE=auto;|' \
-            anykernel.sh
-          grep -nE '^(kernel.string|device.name|BLOCK|IS_SLOT_DEVICE)' anykernel.sh
-
-          zip -r9 "../$ZIP_NAME" . -x '.git/*' '.github/*' 'README.md' '*placeholder'
-
-      - name: Upload hasil akhir (ZIP)
+      - name: 📤 9. Upload File Flashable Zip ke GitHub Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: CustomKernel-Marble-Siap-Flash
+          name: ${{ env.ZIP_NAME }}
           path: ${{ env.ZIP_NAME }}
-
-      - name: Upload driver RTL8188EUS (kalau berhasil dibuild)
-        if: ${{ inputs.enable_rtl8188eus }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: RTL8188EUS-Module
-          path: out-extra/8188eu.ko
-          if-no-files-found: ignore
-
-      - name: Upload log kalau gagal
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log
-          path: kernel-source/build.log
-          if-no-files-found: ignore
+          retention-days: 14
           
