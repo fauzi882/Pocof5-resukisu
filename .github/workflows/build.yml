@@ -351,13 +351,26 @@ jobs:
           split_boot;
           flash_boot;
 
-          # Pasang script tweak otomatis (jalan tiap boot lewat service.d)
-          if [ -d /data/adb ]; then
+          # Pasang script tweak otomatis (jalan tiap boot lewat service.d).
+          # Kernel SUDAH ter-flash di titik ini, jadi kegagalan di sini tidak boleh bikin installer abort.
+          # AK3 baru memakai $AKHOME ($home sudah dihapus -> kosong -> cp gagal -> chmod gagal -> exit 1).
+          AKDIR="${AKHOME:-${home:-$PWD}}";
+          TWEAK_SRC="$AKDIR/99_marble_ratakanan.sh";
+          TWEAK_DST=/data/adb/service.d/99_marble_ratakanan.sh;
+          if [ -d /data/adb ] && [ -f "$TWEAK_SRC" ]; then
             ui_print " " "Memasang script tweak Rata Kanan (TCP BBR, I/O & baterai)...";
-            mkdir -p /data/adb/service.d;
-            cp -f $home/99_marble_ratakanan.sh /data/adb/service.d/99_marble_ratakanan.sh;
-            chmod 0755 /data/adb/service.d/99_marble_ratakanan.sh;
+            if mkdir -p /data/adb/service.d && cp -f "$TWEAK_SRC" "$TWEAK_DST"; then
+              chmod 0755 "$TWEAK_DST";
+              ui_print "Script tweak terpasang.";
+            else
+              ui_print "PERINGATAN: script tweak gagal dipasang (kernel tetap ter-flash).";
+            fi;
+          else
+            ui_print " " "Script tweak dilewati (/data/adb tidak bisa diakses dari recovery).";
           fi;
+
+          # Pastikan status akhir script = sukses supaya updater tidak abort
+          true;
           AKEOF
 
           cat > AnyKernel3/99_marble_ratakanan.sh <<'EOF'
@@ -395,9 +408,19 @@ jobs:
           sysctl -w kernel.printk="0 0 0 0"
           EOF
 
+          # Gerbang cek: syntax installer harus valid sebelum di-zip
+          bash -n AnyKernel3/anykernel.sh \
+            || { echo "::error::anykernel.sh punya syntax error"; exit 1; }
+
           cd AnyKernel3
           ZIP_NAME="Melt-RataKanan-ULTIMATE-Marble-${KERNEL_BRANCH}-ksu-${KSU_BRANCH}-$(date +%Y%m%d-%H%M).zip"
           zip -r9 "../${ZIP_NAME}" ./* -x "*.git*"
+
+          # Gerbang cek: file kritis harus benar-benar ada di dalam ZIP
+          unzip -l "../${ZIP_NAME}" | grep -q '99_marble_ratakanan.sh' \
+            || { echo "::error::99_marble_ratakanan.sh tidak masuk ke ZIP"; exit 1; }
+          unzip -l "../${ZIP_NAME}" | grep -q 'anykernel.sh' \
+            || { echo "::error::anykernel.sh tidak masuk ke ZIP"; exit 1; }
           echo "ZIP_NAME=${ZIP_NAME}" >> "$GITHUB_ENV"
 
       - name: 📤 9. Upload File Flashable ZIP Siap Tempur
