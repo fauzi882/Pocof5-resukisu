@@ -1,10 +1,10 @@
-name: 🚀 Build Melt-RataKanan ULTIMATE POCO F5 (Inline-Hook + Built-in DLKM)
+name: 🚀 Build Melt-RataKanan ULTIMATE POCO F5 (KernelSU-Next)
 
 on:
   workflow_dispatch:
     inputs:
       kernel_branch:
-        description: 'Pilih Branch Source Pzqqt (melt-rebase = Murni, bouquet = Ekstra Fitur)'
+        description: 'Branch source Pzqqt (melt-rebase = Murni, bouquet = Ekstra Fitur)'
         required: true
         default: 'melt-rebase'
         type: choice
@@ -13,23 +13,36 @@ on:
           - bouquet
           - bouquet_ci
       ksu_branch:
-        description: 'Pilih Branch KernelSU-Next (next = Stabil, dev = Paling Baru)'
+        description: 'Branch KernelSU-Next (dev = terbaru + loader SuSFS LKM bawaan, legacy = klasik tanpa SuSFS)'
         required: true
-        default: 'next'
+        default: 'dev'
         type: choice
         options:
-          - next
           - dev
-      pure_inline_hook:
-        description: 'Aktifkan Mode Siluman Inline Hook Murni (Matikan Kprobes)?'
+          - legacy
+      hook_mode:
+        description: 'Mode hook (kprobes = paling aman, syscall_table = tanpa Kprobes, eksperimental & hanya untuk legacy)'
         required: true
-        default: true
-        type: boolean
+        default: 'kprobes'
+        type: choice
+        options:
+          - kprobes
+          - syscall_table
+
+permissions:
+  contents: read
 
 jobs:
   build-marble-ultimate:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+    env:
+      KERNEL_BRANCH: ${{ inputs.kernel_branch }}
+      KSU_BRANCH: ${{ inputs.ksu_branch }}
+      HOOK_MODE: ${{ inputs.hook_mode }}
 
     steps:
       - name: 🧹 1. Bersihkan Disk Runner & Install Senjata Kompilasi (+Aria2c)
@@ -37,308 +50,361 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           sudo apt-get update -y
           sudo apt-get install -y --no-install-recommends \
-            aria2 bc bison build-essential ccache curl device-tree-compiler \
-            flex git libelf-dev libssl-dev libncurses5-dev lz4 \
-            python3 python-is-python3 rsync unzip wget xz-utils zip zstd
+            aria2 bc bison build-essential ccache cpio curl device-tree-compiler \
+            flex gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi git libelf-dev \
+            libncurses-dev libssl-dev lz4 python3 python-is-python3 rsync \
+            unzip wget xz-utils zip zstd
 
       - name: 📥 2. Clone Source Kernel Pzqqt (POCO F5 / marble)
         run: |
-          git clone --depth=1 -b ${{ github.event.inputs.kernel_branch }} \
+          git clone --depth=1 -b "$KERNEL_BRANCH" \
             https://github.com/Pzqqt/android_kernel_xiaomi_marble.git kernel
           cd kernel
           echo "=== INFO COMMIT TERAKHIR SOURCE PZQQT ==="
           git log -1
 
       - name: ⚡ 3. Download Toolchain ZyC Clang/LLVM Terbaru (Anti-Limit + Aria2c Turbo)
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p clang
-          # Bypass API Rate Limit: Ambil link langsung dari Clang-main-link.txt (Clang 23.0.0git)
-          CLANG_URL=$(curl -fsSL "https://raw.githubusercontent.com/ZyCromerZ/Clang/refs/heads/main/Clang-main-link.txt" | tr -d '\r\n')
+          # Ambil link langsung dari Clang-main-link.txt (tanpa kena rate limit API)
+          CLANG_URL=$(curl -fsSL "https://raw.githubusercontent.com/ZyCromerZ/Clang/refs/heads/main/Clang-main-link.txt" | tr -d '\r\n' || true)
 
-          # Jaring pengaman kedua menggunakan autentikasi GITHUB_TOKEN resmi
+          # Jaring pengaman kedua: GitHub API pakai token resmi
           if [ -z "$CLANG_URL" ]; then
-            CLANG_URL=$(curl -fsSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              https://api.github.com/repos/ZyCromerZ/Clang/releases/latest | grep "browser_download_url.*tar.gz" | cut -d '"' -f 4 | head -n 1)
+            CLANG_URL=$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" \
+              https://api.github.com/repos/ZyCromerZ/Clang/releases/latest \
+              | grep -o 'https://[^"]*\.tar\.gz' | head -n 1 || true)
           fi
+          [ -n "$CLANG_URL" ] || { echo "::error::Link toolchain Clang kosong"; exit 1; }
 
           echo "Mengunduh Toolchain dari: $CLANG_URL"
-          aria2c -x16 -s16 --console-log-level=warn "$CLANG_URL" -o clang.tar.gz
+          aria2c -x16 -s16 --console-log-level=warn -o clang.tar.gz "$CLANG_URL"
           tar -xzf clang.tar.gz -C clang
-          rm clang.tar.gz
-          ./clang/bin/clang --version
+          rm -f clang.tar.gz
+
+          # bin/clang biasanya symlink ke clang-NN, jadi cari file ATAU symlink
+          CLANG_BIN=$(find "$PWD/clang" -maxdepth 3 -path '*/bin/clang' \( -type f -o -type l \) | head -n 1)
+          [ -n "$CLANG_BIN" ] || { echo "::error::Binary clang tidak ditemukan di toolchain"; exit 1; }
+          echo "CLANG_BIN_DIR=$(dirname "$CLANG_BIN")" >> "$GITHUB_ENV"
+          "$CLANG_BIN" --version
 
       - name: 🗂️ 4. Aktifkan CCACHE (Sedot Cache Lama Biar Ngebut)
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ~/.ccache
-          key: marble-ccache-${{ github.event.inputs.kernel_branch }}-${{ github.run_id }}
+          key: marble-ccache-${{ inputs.kernel_branch }}-${{ github.run_id }}
           restore-keys: |
-            marble-ccache-${{ github.event.inputs.kernel_branch }}-
-            marble-ultimate-ccache-${{ github.event.inputs.kernel_branch }}-
+            marble-ccache-${{ inputs.kernel_branch }}-
+            marble-ultimate-ccache-${{ inputs.kernel_branch }}-
             marble-ccache-
             marble-ultimate-ccache-
 
-      - name: 🥷 5. Suntik KernelSU-Next + SuSFS + Verifikasi Inline Hook Murni
+      - name: 🥷 5. Suntik KernelSU-Next (Tanpa Patch Palsu, Pakai Branch yang Beneran Ada)
         run: |
           cd kernel
 
-          echo "--> [1/4] Menghapus sisa KernelSU bawaan Pzqqt agar tidak bentrok..."
+          echo "--> [1/3] Bersihkan sisa KernelSU lama biar nggak bentrok..."
           rm -rf KernelSU KernelSU-Next drivers/kernelsu
-          sed -i '/kernelsu/d' drivers/Makefile || true
-          sed -i '/kernelsu/d' drivers/Kconfig || true
+          sed -i '/kernelsu/d' drivers/Makefile
+          sed -i '/drivers\/kernelsu\/Kconfig/d' drivers/Kconfig
 
-          echo "--> [2/4] Menarik KernelSU-Next branch: ${{ github.event.inputs.ksu_branch }}..."
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/${{ github.event.inputs.ksu_branch }}/kernel/setup.sh" | bash -s ${{ github.event.inputs.ksu_branch }}
+          echo "--> [2/3] Clone KernelSU-Next branch: ${KSU_BRANCH} (full history biar versi KSU benar)..."
+          git clone --single-branch -b "$KSU_BRANCH" \
+            https://github.com/KernelSU-Next/KernelSU-Next.git KernelSU-Next
+          git -C KernelSU-Next log -1 --format='KSU-Next commit: %h %s'
 
-          echo "--> [3/4] Menarik SuSFS (gki-android12-5.10) & Menyalin Core File..."
-          git clone --depth=1 -b gki-android12-5.10 https://gitlab.com/simonpunk/susfs4ksu.git ../susfs4ksu
-          cp -rv ../susfs4ksu/kernel_patches/fs/* ./fs/
-          cp -rv ../susfs4ksu/kernel_patches/include/linux/* ./include/linux/
+          echo "--> [3/3] Sambungkan ke drivers/ (sama seperti setup.sh resmi)..."
+          ln -sfr KernelSU-Next/kernel drivers/kernelsu
+          printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
+          [ "$(grep -c '^endmenu' drivers/Kconfig)" -eq 1 ] \
+            || { echo "::error::drivers/Kconfig punya endmenu lebih dari satu, cek manual"; exit 1; }
+          sed -i '/^endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+          [ -f drivers/kernelsu/Kconfig ] || { echo "::error::Symlink drivers/kernelsu rusak"; exit 1; }
 
-          if [ -d "KernelSU-Next" ]; then
-            cd KernelSU-Next
-          elif [ -d "KernelSU" ]; then
-            cd KernelSU
+          # Branch dev WAJIB Kprobes. Mode syscall_table cuma jalan di legacy.
+          HOOK_EFFECTIVE="$HOOK_MODE"
+          if [ "$KSU_BRANCH" = "dev" ] && [ "$HOOK_MODE" != "kprobes" ]; then
+            echo "::warning::Branch dev butuh KPROBES. hook_mode dipaksa ke kprobes."
+            HOOK_EFFECTIVE="kprobes"
           fi
-          patch -p1 --forward < ../../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || true
-          cd ..
+          echo "HOOK_EFFECTIVE=$HOOK_EFFECTIVE" >> "$GITHUB_ENV"
+          echo "Mode hook final: $HOOK_EFFECTIVE"
 
-          echo "--> [4/4] Menerapkan Patch SuSFS + Inline Hooks ke Kernel 5.10..."
-          patch -p1 --forward < ../susfs4ksu/kernel_patches/50_add_susfs_in_kernel-5.10.patch || true
-
-          echo "Daftar file .rej (jika ada):"
-          find . -name "*.rej" -print -delete || true
-
-          HOOK_OK=true
-          for f in fs/exec.c fs/open.c fs/read_write.c fs/stat.c; do
-            if ! grep -q -E "ksu_handle_|susfs_" "$f"; then
-              echo "⚠️ Peringatan: Hook manual belum terdeteksi di $f!"
-              HOOK_OK=false
-            else
-              echo "✅ Inline Hook terkonfirmasi aktif di $f"
-            fi
-          done
-          echo "INLINE_HOOK_VERIFIED=$HOOK_OK" >> $GITHUB_ENV
-
-      - name: ⚙️ 6. Racik Defconfig "RATA KANAN" (Performa, Baterai, TCP BBR, Sinyal, DLKM & KSU)
+      - name: ⚙️ 6. Racik Defconfig "RATA KANAN" (Performa, Baterai, TCP BBR, KSU) + Gerbang Verifikasi
         run: |
           cd kernel
-          export PATH="${GITHUB_WORKSPACE}/clang/bin:${PATH}"
+          export PATH="${CLANG_BIN_DIR}:${PATH}"
 
-          if [ -f "arch/arm64/configs/marble_defconfig" ]; then
-            DEFCONFIG_TARGET="marble_defconfig"
-          elif [ -f "arch/arm64/configs/vendor/marble_GKI.config" ]; then
-            DEFCONFIG_TARGET="gki_defconfig vendor/marble_GKI.config"
-          else
-            DEFCONFIG_TARGET="gki_defconfig"
+          # Argumen make HARUS sama persis di step config & compile (target clang ikut CROSS_COMPILE)
+          KMAKE=(make O=out ARCH=arm64 SUBARCH=arm64 LLVM=1 LLVM_IAS=1
+            CLANG_TRIPLE=aarch64-linux-gnu-
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi-)
+
+          if [ ! -f arch/arm64/configs/marble_defconfig ]; then
+            echo "::error::marble_defconfig tidak ada di branch ${KERNEL_BRANCH}"
+            exit 1
           fi
-          echo "Menggunakan Defconfig: $DEFCONFIG_TARGET"
+          "${KMAKE[@]}" marble_defconfig
 
-          make O=out ARCH=arm64 SUBARCH=arm64 LLVM=1 LLVM_IAS=1 $DEFCONFIG_TARGET
+          cfg() { ./scripts/config --file out/.config "$@"; }
 
-          # [1] Identitas Kernel Siluman
-          ./scripts/config --file out/.config \
-            --set-str CONFIG_LOCALVERSION "-Melt-RataKanan-Ultimate"
+          # [1] KernelSU-Next + mode hook (LOCALVERSION sengaja TIDAK diubah: dipakai vermagic modul vendor)
+          cfg -e CONFIG_KSU -e CONFIG_MODULES -e CONFIG_KALLSYMS -e CONFIG_KALLSYMS_ALL -e CONFIG_EXT4_FS
+          case "${KSU_BRANCH}:${HOOK_EFFECTIVE}" in
+            dev:kprobes)
+              echo "🛡️ KSU-Next dev + KPROBES"
+              cfg -e CONFIG_KPROBES
+              ;;
+            legacy:kprobes)
+              echo "🛡️ KSU-Next legacy + KPROBES hook"
+              cfg -e CONFIG_KPROBES \
+                  -d CONFIG_KSU_MANUAL_HOOK \
+                  -d CONFIG_KSU_SYSCALL_TABLE_HOOK \
+                  -e CONFIG_KSU_KPROBES_HOOK
+              ;;
+            legacy:syscall_table)
+              echo "🥷 KSU-Next legacy + syscall table hook (KPROBES dimatikan)"
+              cfg -d CONFIG_KPROBES -d CONFIG_KPROBE_EVENTS \
+                  -d CONFIG_KSU_MANUAL_HOOK \
+                  -d CONFIG_KSU_KPROBES_HOOK \
+                  -e CONFIG_KSU_SYSCALL_TABLE_HOOK
+              ;;
+            *)
+              echo "::error::Kombinasi tidak dikenal: ${KSU_BRANCH}:${HOOK_EFFECTIVE}"
+              exit 1
+              ;;
+          esac
 
-          # [2] Konfigurasi KernelSU-Next & SuSFS Lengkap
-          ./scripts/config --file out/.config \
-            -e CONFIG_KSU \
-            -e CONFIG_KSU_SUSFS \
-            -e CONFIG_KSU_SUSFS_SUS_PATH \
-            -e CONFIG_KSU_SUSFS_SUS_MOUNT \
-            -e CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT \
-            -e CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT \
-            -e CONFIG_KSU_SUSFS_SUS_KSTAT \
-            -e CONFIG_KSU_SUSFS_TRY_UMOUNT \
-            -e CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT \
-            -e CONFIG_KSU_SUSFS_SPOOF_UNAME \
-            -e CONFIG_KSU_SUSFS_OPEN_REDIRECT \
-            -d CONFIG_KSU_SUSFS_ENABLE_LOG \
-            -d CONFIG_KSU_SUSFS_SUS_SU
+          # [2] Modul, I/O scheduler & NTSYNC (ADIOS/BFQ sudah bawaan Pzqqt, sekadar dipastikan)
+          cfg -e CONFIG_MODULES \
+              -d CONFIG_MODULE_SIG_FORCE \
+              -d CONFIG_MODULE_SIG_ALL \
+              -e CONFIG_NTSYNC \
+              -e CONFIG_MQ_IOSCHED_ADIOS \
+              -e CONFIG_IOSCHED_BFQ
 
-          # [3] Logika Pintar Inline Hook Murni vs Fallback Kprobes
-          if [ "${{ github.event.inputs.pure_inline_hook }}" = "true" ] && [ "${INLINE_HOOK_VERIFIED}" = "true" ]; then
-            echo "🥷 MODE SILUMAN PENUH AKTIF: Mematikan KPROBES & Menggunakan Inline Hook Murni!"
-            ./scripts/config --file out/.config \
-              -d CONFIG_KSU_WITH_KPROBES \
-              -d CONFIG_KSU_KPROBES_HOOK \
-              -d CONFIG_KPROBES \
-              -d CONFIG_KPROBE_EVENTS
-          else
-            echo "🛡️ MODE FALLBACK AMAN AKTIF: Mengaktifkan KPROBES agar Root 100% Terjamin Hidup!"
-            ./scripts/config --file out/.config \
-              -e CONFIG_KSU_WITH_KPROBES \
-              -e CONFIG_KSU_KPROBES_HOOK \
-              -e CONFIG_KPROBES \
-              -e CONFIG_HAVE_KPROBES \
-              -e CONFIG_KPROBE_EVENTS
-          fi
+          # [3] TCP BBR + Fair Queue default
+          cfg -e CONFIG_TCP_CONG_ADVANCED \
+              -e CONFIG_TCP_CONG_BBR \
+              -e CONFIG_TCP_CONG_WESTWOOD \
+              -e CONFIG_DEFAULT_BBR \
+              --set-str CONFIG_DEFAULT_TCP_CONG "bbr" \
+              -e CONFIG_NET_SCHED \
+              -e CONFIG_NET_SCH_FQ \
+              -e CONFIG_NET_SCH_FQ_CODEL \
+              -e CONFIG_DEFAULT_FQ \
+              --set-str CONFIG_DEFAULT_NET_SCH "fq" \
+              -e CONFIG_NETFILTER_XT_TARGET_HL \
+              -e CONFIG_IP_SET
 
-          # [4] Leburkan Modul DLKM Penting Langsung ke Image.gz (=y) & Buka Kunci Modul Vendor ROM
-          ./scripts/config --file out/.config \
-            -e CONFIG_MODULES \
-            -d CONFIG_MODULE_SIG_FORCE \
-            -d CONFIG_MODULE_SIG_ALL \
-            -e CONFIG_NTSYNC \
-            -e CONFIG_MQ_IOSCHED_ADIOS \
-            -e CONFIG_IOSCHED_BFQ \
-            -e CONFIG_MTK_CPQ_IO_SCHED
+          # [4] Matikan log/debug yang cuma bikin berisik (tanpa nyenggol RMNET/IPA modul vendor)
+          cfg -d CONFIG_IPA_DEBUG \
+              -d CONFIG_IPC_LOGGING \
+              -d CONFIG_QCOM_RTB \
+              -e CONFIG_BOEFFLA_WL_BLOCKER
 
-          # [5] Upgrade TCP BBR + Fair Queue (FQ) Default & Bypass Tethering/TTL
-          ./scripts/config --file out/.config \
-            -e CONFIG_TCP_CONG_ADVANCED \
-            -e CONFIG_TCP_CONG_BBR \
-            -e CONFIG_TCP_CONG_WESTWOOD \
-            -e CONFIG_DEFAULT_BBR \
-            --set-str CONFIG_DEFAULT_TCP_CONG "bbr" \
-            -e CONFIG_NET_SCHED \
-            -e CONFIG_NET_SCH_FQ \
-            -e CONFIG_NET_SCH_FQ_CODEL \
-            -e CONFIG_DEFAULT_FQ \
-            --set-str CONFIG_DEFAULT_NET_SCH "fq" \
-            -e CONFIG_NETFILTER_XT_TARGET_HL \
-            -e CONFIG_IP_NF_TARGET_TTL \
-            -e CONFIG_IP6_NF_TARGET_HL \
-            -e CONFIG_IP_SET
+          # [5] Performa & baterai (ThinLTO + 300Hz + MGLRU)
+          cfg -d CONFIG_LTO_NONE -d CONFIG_LTO_CLANG_FULL -e CONFIG_LTO_CLANG_THIN \
+              -e CONFIG_HZ_300 -d CONFIG_HZ_250 -d CONFIG_HZ_100 -d CONFIG_HZ_1000 \
+              --set-val CONFIG_HZ 300 \
+              -e CONFIG_WQ_POWER_EFFICIENT_DEFAULT \
+              -e CONFIG_ENERGY_MODEL \
+              -e CONFIG_UCLAMP_TASK \
+              -e CONFIG_UCLAMP_TASK_GROUP \
+              -e CONFIG_LRU_GEN \
+              -e CONFIG_LRU_GEN_ENABLED \
+              -e CONFIG_CRYPTO_LZ4 \
+              -e CONFIG_CRYPTO_ZSTD
 
-          # [6] Penguatan Jalur Sinyal Seluler & GPS (Bersihkan Bottleneck QMI/RMNET/IPA)
-          ./scripts/config --file out/.config \
-            -e CONFIG_RMNET_PERF \
-            -e CONFIG_RMNET_SHS \
-            -d CONFIG_IPA_DEBUG \
-            -d CONFIG_IPC_LOGGING \
-            -d CONFIG_QCOM_RTB \
-            -e CONFIG_BOEFFLA_WL_BLOCKER
+          # [6] Diet debug. AUDIT / PRINTK_TIME / SLUB_DEBUG SENGAJA DIBIARKAN:
+          #     AUDIT dibutuhkan SELinux (tanpa itu Android nggak boot), dua lainnya berisiko tanpa untung berarti.
+          cfg -d CONFIG_DEBUG_FS \
+              -d CONFIG_CORESIGHT \
+              -d CONFIG_PAGE_OWNER \
+              -d CONFIG_DEBUG_PAGEALLOC
 
-          # [7] Performa Rata Kanan & Efisiensi Baterai (ThinLTO + 300Hz + MGLRU Anti-Panic)
-          ./scripts/config --file out/.config \
-            -e CONFIG_LTO_CLANG_THIN \
-            -e CONFIG_HZ_300 \
-            --set-val CONFIG_HZ 300 \
-            -e CONFIG_WQ_POWER_EFFICIENT_DEFAULT \
-            -e CONFIG_ENERGY_MODEL \
-            -e CONFIG_UCLAMP_TASK \
-            -e CONFIG_UCLAMP_TASK_GROUP \
-            -e CONFIG_LRU_GEN \
-            -e CONFIG_LRU_GEN_ENABLED \
-            -d CONFIG_KSHRINK_LRUVECD \
-            -e CONFIG_CRYPTO_LZ4 \
-            -e CONFIG_CRYPTO_ZSTD
+          "${KMAKE[@]}" olddefconfig
 
-          # [8] Diet Ketat Sampah Kernel (Hapus Overhead Tracing & Audit)
-          ./scripts/config --file out/.config \
-            -d CONFIG_AUDIT \
-            -d CONFIG_DEBUG_FS \
-            -d CONFIG_CORESIGHT \
-            -d CONFIG_PAGE_OWNER \
-            -d CONFIG_DEBUG_PAGEALLOC \
-            -d CONFIG_SLUB_DEBUG \
-            -d CONFIG_PRINTK_TIME
+          echo "=== GERBANG VERIFIKASI CONFIG ==="
+          FAIL=0
+          need() { if grep -q "^$1$" out/.config; then echo "✅ $1"; else echo "::error::WAJIB ada tapi hilang: $1"; FAIL=1; fi; }
+          want() { if grep -q "^$1$" out/.config; then echo "✅ $1"; else echo "⚠️ $1 tidak masuk (simbol tidak ada / ketimpa dependensi)"; fi; }
 
-          make O=out ARCH=arm64 SUBARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
+          need CONFIG_KSU=y
+          need CONFIG_SECURITY_SELINUX=y
+          need CONFIG_AUDIT=y
+          need CONFIG_MODULES=y
+          case "${KSU_BRANCH}:${HOOK_EFFECTIVE}" in
+            dev:kprobes)             need CONFIG_KPROBES=y ;;
+            legacy:kprobes)          need CONFIG_KPROBES=y; need CONFIG_KSU_KPROBES_HOOK=y ;;
+            legacy:syscall_table)    need CONFIG_KSU_SYSCALL_TABLE_HOOK=y
+                                     grep -q '^CONFIG_KPROBES=y$' out/.config \
+                                       && echo "⚠️ KPROBES tetap aktif karena di-select fitur lain (root tetap jalan)" ;;
+          esac
+          [ "$FAIL" = "0" ] || { echo "::error::Config kritis tidak lengkap, build dihentikan sebelum buang waktu 1 jam"; exit 1; }
+
+          want CONFIG_DEFAULT_TCP_CONG=\"bbr\"
+          want CONFIG_DEFAULT_NET_SCH=\"fq\"
+          want CONFIG_NTSYNC=y
+          want CONFIG_MQ_IOSCHED_ADIOS=y
+          want CONFIG_BOEFFLA_WL_BLOCKER=y
+          want CONFIG_LRU_GEN=y
+          want CONFIG_HZ_300=y
+          want CONFIG_LTO_CLANG_THIN=y
 
       - name: 🔥 7. Compile Kernel Image (Gaspol Semua Core + Turbo CCACHE)
         run: |
           cd kernel
-          export PATH="/usr/lib/ccache:${GITHUB_WORKSPACE}/clang/bin:${PATH}"
+          export PATH="${CLANG_BIN_DIR}:${PATH}"
           export CCACHE_DIR="${HOME}/.ccache"
           export CCACHE_SLOPPINESS="file_macro,locale,time_macros"
           export CCACHE_NOHASHDIR="true"
+          # Cache valid selama versi clang sama (aman walau toolchain di-download ulang tiap run)
+          export CCACHE_COMPILERCHECK="string:$(clang --version | head -n 1)"
           export KBUILD_BUILD_TIMESTAMP="Thu Oct 15 00:00:00 UTC 2026"
           export KBUILD_BUILD_USER="Fauzi"
           export KBUILD_BUILD_HOST="RataKanan-Lab"
 
+          mkdir -p "$CCACHE_DIR"
           ccache -M 5G
           ccache -z
 
-          make -j$(nproc --all) \
-            O=out \
-            ARCH=arm64 \
-            SUBARCH=arm64 \
+          KMAKE=(make O=out ARCH=arm64 SUBARCH=arm64 LLVM=1 LLVM_IAS=1
+            CLANG_TRIPLE=aarch64-linux-gnu-
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi-)
+
+          # KCFLAGS=-Wno-error: clang super baru + kernel 5.10 sering ribut soal warning
+          "${KMAKE[@]}" -j"$(nproc --all)" \
             CC="ccache clang" \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            LLVM=1 \
-            LLVM_IAS=1 \
-            Image Image.gz
+            KCFLAGS="-Wno-error" \
+            Image Image.gz 2>&1 | tee ../build.log
 
           ccache -s
+          [ -f out/arch/arm64/boot/Image ] || { echo "::error::Image tidak terbentuk"; exit 1; }
 
-      - name: 📦 8. Rakit AnyKernel3 + Auto-Installer Script Rata Kanan (TCP, Baterai & Sinyal)
+      - name: 💾 7b. Simpan CCACHE (Walau Build Gagal/Timeout, Progres Tetap Kesimpan)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.ccache
+          key: marble-ccache-${{ inputs.kernel_branch }}-${{ github.run_id }}
+
+      - name: 🪵 7c. Upload Log Kalau Build Gagal
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-gagal
+          path: |
+            build.log
+            kernel/out/.config
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: 📦 8. Rakit AnyKernel3 + Auto-Installer Script Rata Kanan (TCP, Baterai & I/O)
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
-          rm -rf AnyKernel3/.git AnyKernel3/README.md
+          rm -rf AnyKernel3/.git AnyKernel3/.github AnyKernel3/README.md
 
-          sed -i 's/device.name1=.*/device.name1=marble/' AnyKernel3/anykernel.sh
-          sed -i 's/device.name2=.*/device.name2=marblein/' AnyKernel3/anykernel.sh
-          sed -i 's/BLOCK=.*/BLOCK=auto;/' AnyKernel3/anykernel.sh
-          sed -i 's/IS_SLOT_DEVICE=.*/IS_SLOT_DEVICE=1;/' AnyKernel3/anykernel.sh
-
-          if [ -f "kernel/out/arch/arm64/boot/Image.gz" ]; then
+          if [ -f kernel/out/arch/arm64/boot/Image.gz ]; then
             cp kernel/out/arch/arm64/boot/Image.gz AnyKernel3/
           else
             cp kernel/out/arch/arm64/boot/Image AnyKernel3/
           fi
 
-          cat << 'EOF' > AnyKernel3/99_marble_ratakanan.sh
+          # anykernel.sh bersih khusus marble (bawaan AK3 penuh patch ramdisk device "tuna", nggak relevan)
+          cat > AnyKernel3/anykernel.sh <<'AKEOF'
+          ### AnyKernel3 Ramdisk Mod Script - Melt RataKanan (POCO F5 / marble)
+
+          properties() { '
+          kernel.string=Melt RataKanan Ultimate (POCO F5 / marble)
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=0
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=marble
+          device.name2=marblein
+          device.name3=
+          device.name4=
+          device.name5=
+          supported.versions=
+          supported.patchlevels=
+          supported.vendorpatchlevels=
+          '; } # end properties
+
+          # boot shell variables
+          BLOCK=boot;
+          IS_SLOT_DEVICE=auto;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
+
+          # import functions/variables and setup patching (DO NOT REMOVE)
+          . tools/ak3-core.sh;
+
+          # kernel only: nggak utak-atik ramdisk
+          split_boot;
+          flash_boot;
+
+          # Pasang script tweak otomatis (jalan tiap boot lewat service.d)
+          if [ -d /data/adb ]; then
+            ui_print " " "Memasang script tweak Rata Kanan (TCP BBR, I/O & baterai)...";
+            mkdir -p /data/adb/service.d;
+            cp -f $home/99_marble_ratakanan.sh /data/adb/service.d/99_marble_ratakanan.sh;
+            chmod 0755 /data/adb/service.d/99_marble_ratakanan.sh;
+          fi;
+          AKEOF
+
+          cat > AnyKernel3/99_marble_ratakanan.sh <<'EOF'
           #!/system/bin/sh
           while [ "$(getprop sys.boot_completed)" != "1" ]; do
               sleep 2
           done
 
-          # 1. Kunci Paksa TCP BBR + Fair Queue (FQ) + ECN + FastOpen
+          # 1. Kunci TCP BBR + Fair Queue (FQ) + ECN + FastOpen
           sysctl -w net.core.default_qdisc=fq
           sysctl -w net.ipv4.tcp_congestion_control=bbr
           sysctl -w net.ipv4.tcp_ecn=1
           sysctl -w net.ipv4.tcp_fastopen=3
           sysctl -w net.ipv4.tcp_tw_reuse=1
 
-          # 2. Perbesar Buffer Jaringan Seluler & WiFi (Anti-Lag Saat Sinyal Goyang)
+          # 2. Perbesar buffer jaringan seluler & WiFi
           sysctl -w net.core.rmem_max=16777216
           sysctl -w net.core.wmem_max=16777216
           sysctl -w net.ipv4.tcp_rmem="4096 87380 16777216"
           sysctl -w net.ipv4.tcp_wmem="4096 65536 16777216"
 
-          # 3. Aktifkan I/O Scheduler ADIOS / CPQ
-          for queue in /sys/block/sd*/queue/scheduler /sys/block/mmcblk*/queue/scheduler; do
-              if [ -f "$queue" ]; then
-                  if grep -q "adios" "$queue"; then
-                      echo "adios" > "$queue" 2>/dev/null
-                  elif grep -q "cpq" "$queue"; then
-                      echo "cpq" > "$queue" 2>/dev/null
-                  fi
+          # 3. Aktifkan I/O scheduler ADIOS (UFS marble = /sys/block/sd*)
+          for queue in /sys/block/sd*/queue/scheduler; do
+              if [ -f "$queue" ] && grep -q "adios" "$queue"; then
+                  echo "adios" > "$queue" 2>/dev/null
               fi
           done
 
-          # 4. Blokir Wakelock Penyedot Baterai via Boeffla Wakelock Blocker
+          # 4. Blokir wakelock penyedot baterai via Boeffla Wakelock Blocker
           if [ -f "/sys/class/misc/boeffla_wakelock_blocker/wakelock_blocker" ]; then
               echo "qcom_rx_wakelock;wlan_pno_wl;wlan_extscan_wl;ipa_client_apps_wan_cons;NETLINK" > /sys/class/misc/boeffla_wakelock_blocker/wakelock_blocker 2>/dev/null
           fi
 
-          # 5. Pangkas Printk Log Spam Kernel di Background
+          # 5. Pangkas spam printk kernel
           sysctl -w kernel.printk="0 0 0 0"
           EOF
 
-          cat << 'EOF' >> AnyKernel3/anykernel.sh
-
-          # === AUTO-INSTALL RATA KANAN SERVICE SCRIPT ===
-          if [ -d "/data/adb/service.d" ]; then
-            ui_print "- Memasang Script Auto-Tweak Rata Kanan (TCP BBR, I/O & Baterai)..."
-            cp -f $home/99_marble_ratakanan.sh /data/adb/service.d/99_marble_ratakanan.sh
-            chmod 0755 /data/adb/service.d/99_marble_ratakanan.sh
-          fi
-          EOF
-
           cd AnyKernel3
-          ZIP_NAME="Melt-RataKanan-ULTIMATE-Marble-${{ github.event.inputs.kernel_branch }}-$(date +%Y%m%d-%H%M).zip"
-          zip -r9 "../${ZIP_NAME}" * -x "*.git*"
-          echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
+          ZIP_NAME="Melt-RataKanan-ULTIMATE-Marble-${KERNEL_BRANCH}-ksu-${KSU_BRANCH}-$(date +%Y%m%d-%H%M).zip"
+          zip -r9 "../${ZIP_NAME}" ./* -x "*.git*"
+          echo "ZIP_NAME=${ZIP_NAME}" >> "$GITHUB_ENV"
 
       - name: 📤 9. Upload File Flashable ZIP Siap Tempur
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ZIP_NAME }}
           path: ${{ env.ZIP_NAME }}
+          if-no-files-found: error
           retention-days: 14
           
