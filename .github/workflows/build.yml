@@ -1,4 +1,4 @@
-name: 🚀 Build Melt-RataKanan CLEAN & STABLE POCO F5 (Pure KSU + Built-in DLKM)
+name: 🚀 Build KSU-Next + SuSFS + Security POCO F5
 
 on:
   workflow_dispatch:
@@ -11,9 +11,8 @@ on:
         options:
           - melt-rebase
           - bouquet
-          - bouquet_ci
       ksu_branch:
-        description: 'Pilih Branch KernelSU-Next (Disarankan: next)'
+        description: 'Branch KernelSU-Next'
         required: true
         default: 'next'
         type: choice
@@ -22,7 +21,7 @@ on:
           - dev
 
 jobs:
-  build-marble-clean:
+  build-marble-security:
     runs-on: ubuntu-latest
     timeout-minutes: 120
 
@@ -41,25 +40,20 @@ jobs:
           git clone --depth=1 -b ${{ github.event.inputs.kernel_branch }} \
             https://github.com/Pzqqt/android_kernel_xiaomi_marble.git kernel
           cd kernel
-          echo "=== INFO COMMIT TERAKHIR SOURCE PZQQT ==="
-          git log -1
 
-      - name: ⚡ 3. Download Toolchain ZyC Clang/LLVM Terbaru (Anti-Limit + Aria2c Turbo)
+      - name: ⚡ 3. Download Toolchain ZyC Clang/LLVM Terbaru
         run: |
           mkdir -p clang
           CLANG_URL=$(curl -fsSL "https://raw.githubusercontent.com/ZyCromerZ/Clang/refs/heads/main/Clang-main-link.txt" | tr -d '\r\n')
-
           if [ -z "$CLANG_URL" ]; then
             CLANG_URL=$(curl -fsSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
               https://api.github.com/repos/ZyCromerZ/Clang/releases/latest | grep "browser_download_url.*tar.gz" | cut -d '"' -f 4 | head -n 1)
           fi
-
-          echo "Mengunduh Toolchain dari: $CLANG_URL"
           aria2c -x16 -s16 --console-log-level=warn "$CLANG_URL" -o clang.tar.gz
           tar -xzf clang.tar.gz -C clang
           rm clang.tar.gz
 
-      - name: 🗂️ 4. Aktifkan CCACHE (Sedot Cache Lama Biar Ngebut)
+      - name: 🗂️ 4. Aktifkan CCACHE
         uses: actions/cache@v4
         with:
           path: ~/.ccache
@@ -68,105 +62,90 @@ jobs:
             marble-ccache-${{ github.event.inputs.kernel_branch }}-
             marble-ccache-
 
-      - name: 🛡️ 5. Suntik Pure KernelSU-Next (Tanpa SuSFS demi Stabilitas Boot)
+      - name: 🥷 5. Suntik KSU-Next + SuSFS & BYPASS ERROR FLASK.H
         run: |
           cd kernel
-
-          echo "--> [1/2] Menghapus sisa KernelSU bawaan Pzqqt..."
           rm -rf KernelSU KernelSU-Next drivers/kernelsu
           sed -i '/kernelsu/d' drivers/Makefile || true
           sed -i '/kernelsu/d' drivers/Kconfig || true
 
-          echo "--> [2/2] Menarik Pure KernelSU-Next branch: ${{ github.event.inputs.ksu_branch }}..."
+          # Tarik KSU-Next
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/${{ github.event.inputs.ksu_branch }}/kernel/setup.sh" | bash -s ${{ github.event.inputs.ksu_branch }}
 
-      - name: ⚙️ 6. Racik Defconfig "RATA KANAN BERSIH" (Performa, TCP BBR, KSU Stabil)
+          # Tarik SuSFS
+          git clone --depth=1 -b gki-android12-5.10 https://gitlab.com/simonpunk/susfs4ksu.git ../susfs4ksu
+          cp -rv ../susfs4ksu/kernel_patches/fs/* ./fs/
+          cp -rv ../susfs4ksu/kernel_patches/include/linux/* ./include/linux/
+
+          # Patch KSU & Kernel
+          if [ -d "KernelSU-Next" ]; then cd KernelSU-Next; else cd KernelSU; fi
+          patch -p1 --forward < ../../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || true
+          cd ..
+          patch -p1 --forward < ../susfs4ksu/kernel_patches/50_add_susfs_in_kernel-5.10.patch || true
+          
+          # Hapus file reject biar rapi
+          find . -name "*.rej" -print -delete || true
+
+          # === JURUS BYPASS FATAL ERROR FLASK.H ===
+          # Paksa Makefile KernelSU untuk ngebaca direktori SELinux generated headers!
+          echo "ccflags-y += -I\$(srctree)/security/selinux/include" >> drivers/kernelsu/Makefile
+          echo "ccflags-y += -I\$(objtree)/security/selinux/include" >> drivers/kernelsu/Makefile
+
+      - name: ⚙️ 6. Racik Defconfig (Fokus Keamanan KSU + SuSFS)
         run: |
           cd kernel
           export PATH="${GITHUB_WORKSPACE}/clang/bin:${PATH}"
 
           if [ -f "arch/arm64/configs/marble_defconfig" ]; then
             DEFCONFIG_TARGET="marble_defconfig"
-          elif [ -f "arch/arm64/configs/vendor/marble_GKI.config" ]; then
-            DEFCONFIG_TARGET="gki_defconfig vendor/marble_GKI.config"
           else
             DEFCONFIG_TARGET="gki_defconfig"
           fi
           
           make O=out ARCH=arm64 SUBARCH=arm64 LLVM=1 LLVM_IAS=1 $DEFCONFIG_TARGET
 
-          # [1] Identitas Kernel
-          ./scripts/config --file out/.config \
-            --set-str CONFIG_LOCALVERSION "-Melt-RataKanan-Clean"
+          # Identitas
+          ./scripts/config --file out/.config --set-str CONFIG_LOCALVERSION "-Melt-KSU-SuSFS"
 
-          # [2] Konfigurasi Pure KernelSU-Next (Wajib Kprobes Aktif)
+          # Konfigurasi KSU + SuSFS (Kprobes ON sebagai jaring pengaman utama)
           ./scripts/config --file out/.config \
             -e CONFIG_KSU \
             -e CONFIG_KSU_WITH_KPROBES \
             -e CONFIG_KSU_KPROBES_HOOK \
             -e CONFIG_KPROBES \
             -e CONFIG_HAVE_KPROBES \
-            -e CONFIG_KPROBE_EVENTS
+            -e CONFIG_KPROBE_EVENTS \
+            -e CONFIG_KSU_SUSFS \
+            -e CONFIG_KSU_SUSFS_SUS_PATH \
+            -e CONFIG_KSU_SUSFS_SUS_MOUNT \
+            -e CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT \
+            -e CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT \
+            -e CONFIG_KSU_SUSFS_SUS_KSTAT \
+            -e CONFIG_KSU_SUSFS_TRY_UMOUNT \
+            -e CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT \
+            -e CONFIG_KSU_SUSFS_SPOOF_UNAME \
+            -e CONFIG_KSU_SUSFS_OPEN_REDIRECT \
+            -d CONFIG_KSU_SUSFS_ENABLE_LOG \
+            -d CONFIG_KSU_SUSFS_SUS_SU
 
-          # [3] Leburkan Modul DLKM Penting Langsung ke Image.gz (=y)
+          # Matikan DLKM Signature check biar aman booting
           ./scripts/config --file out/.config \
             -e CONFIG_MODULES \
             -d CONFIG_MODULE_SIG_FORCE \
-            -d CONFIG_MODULE_SIG_ALL \
-            -e CONFIG_NTSYNC \
-            -e CONFIG_MQ_IOSCHED_ADIOS \
-            -e CONFIG_IOSCHED_BFQ \
-            -e CONFIG_MTK_CPQ_IO_SCHED
-
-          # [4] Upgrade TCP BBR + Fair Queue (FQ)
-          ./scripts/config --file out/.config \
-            -e CONFIG_TCP_CONG_ADVANCED \
-            -e CONFIG_TCP_CONG_BBR \
-            -e CONFIG_DEFAULT_BBR \
-            --set-str CONFIG_DEFAULT_TCP_CONG "bbr" \
-            -e CONFIG_NET_SCHED \
-            -e CONFIG_NET_SCH_FQ \
-            -e CONFIG_NET_SCH_FQ_CODEL \
-            -e CONFIG_DEFAULT_FQ \
-            --set-str CONFIG_DEFAULT_NET_SCH "fq" \
-            -e CONFIG_NETFILTER_XT_TARGET_HL \
-            -e CONFIG_IP_NF_TARGET_TTL \
-            -e CONFIG_IP6_NF_TARGET_HL
-
-          # [5] Performa Rata Kanan (ThinLTO + 300Hz + MGLRU)
-          ./scripts/config --file out/.config \
-            -e CONFIG_LTO_CLANG_THIN \
-            -e CONFIG_HZ_300 \
-            --set-val CONFIG_HZ 300 \
-            -e CONFIG_WQ_POWER_EFFICIENT_DEFAULT \
-            -e CONFIG_LRU_GEN \
-            -e CONFIG_LRU_GEN_ENABLED \
-            -d CONFIG_KSHRINK_LRUVECD \
-            -e CONFIG_CRYPTO_LZ4 \
-            -e CONFIG_CRYPTO_ZSTD \
-            -e CONFIG_RMNET_PERF \
-            -e CONFIG_RMNET_SHS \
-            -e CONFIG_BOEFFLA_WL_BLOCKER
-
-          # [6] Diet Sampah Kernel
-          ./scripts/config --file out/.config \
-            -d CONFIG_AUDIT \
-            -d CONFIG_DEBUG_FS \
-            -d CONFIG_CORESIGHT \
-            -d CONFIG_PAGE_OWNER \
-            -d CONFIG_SLUB_DEBUG
+            -d CONFIG_MODULE_SIG_ALL
 
           make O=out ARCH=arm64 SUBARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
 
-      - name: 🔥 7. Compile Kernel Image (Gaspol Semua Core)
+      - name: 🔥 7. Compile Kernel Image (Gaspol!)
         run: |
           cd kernel
           export PATH="/usr/lib/ccache:${GITHUB_WORKSPACE}/clang/bin:${PATH}"
           export CCACHE_DIR="${HOME}/.ccache"
           export CCACHE_SLOPPINESS="file_macro,locale,time_macros"
           export KBUILD_BUILD_TIMESTAMP="Thu Oct 15 00:00:00 UTC 2026"
-          export KBUILD_BUILD_USER="Fauzi"
-          export KBUILD_BUILD_HOST="Clean-Lab"
+          
+          # JALANKAN MODULES_PREPARE DULU BIAR FLASK.H TERCIPTA SEBELUM KSU DI-COMPILE!
+          make O=out ARCH=arm64 SUBARCH=arm64 LLVM=1 LLVM_IAS=1 modules_prepare
 
           ccache -M 5G
           ccache -z
@@ -185,7 +164,7 @@ jobs:
 
           ccache -s
 
-      - name: 📦 8. Rakit AnyKernel3 + Script Tweak Rata Kanan
+      - name: 📦 8. Rakit AnyKernel3
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
           rm -rf AnyKernel3/.git AnyKernel3/README.md
@@ -201,47 +180,8 @@ jobs:
             cp kernel/out/arch/arm64/boot/Image AnyKernel3/
           fi
 
-          cat << 'EOF' > AnyKernel3/99_marble_ratakanan.sh
-          #!/system/bin/sh
-          while [ "$(getprop sys.boot_completed)" != "1" ]; do
-              sleep 2
-          done
-
-          sysctl -w net.core.default_qdisc=fq
-          sysctl -w net.ipv4.tcp_congestion_control=bbr
-          sysctl -w net.ipv4.tcp_ecn=1
-          sysctl -w net.ipv4.tcp_fastopen=3
-          sysctl -w net.ipv4.tcp_tw_reuse=1
-          
-          sysctl -w net.core.rmem_max=16777216
-          sysctl -w net.core.wmem_max=16777216
-
-          for queue in /sys/block/sd*/queue/scheduler /sys/block/mmcblk*/queue/scheduler; do
-              if [ -f "$queue" ]; then
-                  if grep -q "adios" "$queue"; then
-                      echo "adios" > "$queue" 2>/dev/null
-                  elif grep -q "cpq" "$queue"; then
-                      echo "cpq" > "$queue" 2>/dev/null
-                  fi
-              fi
-          done
-
-          if [ -f "/sys/class/misc/boeffla_wakelock_blocker/wakelock_blocker" ]; then
-              echo "qcom_rx_wakelock;wlan_pno_wl;wlan_extscan_wl;ipa_client_apps_wan_cons;NETLINK" > /sys/class/misc/boeffla_wakelock_blocker/wakelock_blocker 2>/dev/null
-          fi
-          EOF
-
-          cat << 'EOF' >> AnyKernel3/anykernel.sh
-
-          if [ -d "/data/adb/service.d" ]; then
-            ui_print "- Memasang Script Auto-Tweak Rata Kanan..."
-            cp -f $home/99_marble_ratakanan.sh /data/adb/service.d/99_marble_ratakanan.sh
-            chmod 0755 /data/adb/service.d/99_marble_ratakanan.sh
-          fi
-          EOF
-
           cd AnyKernel3
-          ZIP_NAME="Melt-RataKanan-CLEAN-Marble-${{ github.event.inputs.kernel_branch }}-$(date +%Y%m%d-%H%M).zip"
+          ZIP_NAME="Melt-Security-SuSFS-Marble-${{ github.event.inputs.kernel_branch }}-$(date +%Y%m%d-%H%M).zip"
           zip -r9 "../${ZIP_NAME}" * -x "*.git*"
           echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
 
