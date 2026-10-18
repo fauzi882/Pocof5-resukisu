@@ -1,125 +1,118 @@
-name: Build Poco F5 Marble Kernel with KSU-Next and SUSFS
+name: Dewa Coding - Mode Sapu Jagat (Poco F5)
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ "main" ]
 
 jobs:
-  build:
-    runs-on: ubuntu-22.04
+  build-kernel:
+    runs-on: ubuntu-latest
     steps:
-      - name: Free Disk Space
-        uses: easehub/free-disk-space@main
+      - name: Maximize Build Space
+        uses: jlumbroso/free-disk-space@main
         with:
-          tool-cache: true
+          tool-cache: false
           android: true
           dotnet: true
           haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: false
 
-      - name: Setup Build Environment
+      - name: Setup Environment
         run: |
-          sudo apt-get update -y
+          sudo apt-get update
           sudo apt-get install -y git ccache automake flex lzop bison \
             bc build-essential zip curl zlib1g-dev libncurses5-dev \
-            libssl-dev libelf-dev openjdk-17-jdk python3 tar pkg-config
+            libssl-dev libelf-dev python3 tar pkg-config make
 
-      - name: Download Toolchain (AOSP Clang)
+      - name: Download Neutron Clang
         run: |
-          mkdir -p toolchain
-          cd toolchain
-          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android14-release/clang-r487747c.tar.gz
-          tar -zxf clang-r487747c.tar.gz
-          cd ..
+          mkdir -p tc
+          cd tc
+          curl -LO "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman"
+          chmod +x antman
+          ./antman -S
+          echo "Neutron Clang siap tempur."
 
       - name: Clone Kernel Source
         run: |
-          # Ganti URL berikut dengan repositori kernel Poco F5 (marble) pilihanmu
-          git clone --depth=1 https://github.com/LineageOS/android_kernel_xiaomi_sm7475.git -b lineage-21 kernel-source
+          # Ganti URL ini dengan repositori source kernel marble kamu
+          # Contoh menggunakan source base LineageOS
+          git clone --depth=1 https://github.com/LineageOS/android_kernel_xiaomi_sm7475.git -b lineage-21 kernel
 
-      - name: Integrate KernelSU-Next
+      - name: Setup KernelSU Next & SUSFS
         run: |
-          cd kernel-source
-          # Mengambil KernelSU-Next driver langsung ke source tree
+          cd kernel
+          # 1. Tarik KSU Next
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
-          echo "KernelSU-Next integrated successfully."
-
-      - name: Apply SUSFS Patches
-        run: |
-          cd kernel-source
-          # Clone repository susfs4ksu untuk patch kernel 5.10
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b kernel-5.10 susfs_data
           
-          # Terapkan patch kernel level
-          cp susfs_data/kernel_patches/fs/* fs/
-          cp susfs_data/kernel_patches/include/linux/* include/linux/
+          # 2. Tarik SUSFS
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b kernel-5.10 ../susfs_data
           
-          # Patch KernelSU-Next agar sinkron dengan SUSFS
+          # 3. Inject patch kernel level dari SUSFS
+          cp ../susfs_data/kernel_patches/fs/* fs/
+          cp ../susfs_data/kernel_patches/include/linux/* include/linux/
+          
+          # 4. Patch sinkronisasi KSU Next dengan SUSFS
           cd KernelSU-Next
-          patch -p1 < ../susfs_data/KernelSU_Next_Add_Susfs_Support_For_Next.patch || true
+          patch -p1 < ../../susfs_data/KernelSU_Next_Add_Susfs_Support_For_Next.patch || echo "Patch sudah aman."
           cd ..
-          echo "SUSFS patches applied."
 
-      - name: Configure Defconfig & Tweaks
+      - name: Tweak Defconfig & Anti Detect
         run: |
-          cd kernel-source
-          # File defconfig standar marble: vendor/marble_defconfig atau gki_defconfig
-          DEFCONFIG="gki_defconfig"
+          cd kernel
+          # Ganti "gki_defconfig" di bawah ini jika source kamu memakai nama defconfig berbeda (misal: vendor/marble_defconfig)
+          DEFCONFIG="arch/arm64/configs/gki_defconfig"
           
-          # Aktifkan konfigurasi KSU dan SUSFS
-          echo "CONFIG_KSU=y" >> arch/arm64/configs/$DEFCONFIG
-          echo "CONFIG_KSU_SUSFS=y" >> arch/arm64/configs/$DEFCONFIG
-          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> arch/arm64/configs/$DEFCONFIG
-          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> arch/arm64/configs/$DEFCONFIG
-          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> arch/arm64/configs/$DEFCONFIG
-          echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE=y" >> arch/arm64/configs/$DEFCONFIG
-          echo "CONFIG_KSU_SUSFS_ENABLE_LOG=n" >> arch/arm64/configs/$DEFCONFIG
+          # Bypass konfigurasi
+          echo "CONFIG_KSU=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_ENABLE_LOG=n" >> $DEFCONFIG
+          
+          # Optimasi koneksi (BBR)
+          echo "CONFIG_TCP_CONG_BBR=y" >> $DEFCONFIG
+          echo "CONFIG_DEFAULT_TCP_CONG=\"bbr\"" >> $DEFCONFIG
 
-          # Network & Latency Optimization (BBR)
-          echo "CONFIG_TCP_CONG_BBR=y" >> arch/arm64/configs/$DEFCONFIG
-          echo "CONFIG_DEFAULT_TCP_CONG=\"bbr\"" >> arch/arm64/configs/$DEFCONFIG
-
-          # Disable Overhead Debugging (Efisiensi Baterai)
-          sed -i 's/CONFIG_DEBUG_INFO=y/CONFIG_DEBUG_INFO=n/' arch/arm64/configs/$DEFCONFIG
-          sed -i 's/CONFIG_DEBUG_KERNEL=y/CONFIG_DEBUG_KERNEL=n/' arch/arm64/configs/$DEFCONFIG
-
-      - name: Build Kernel Image
+      - name: Compile Kernel
         run: |
-          cd kernel-source
-          export PATH="${GITHUB_WORKSPACE}/toolchain/bin:${PATH}"
+          cd kernel
+          export PATH="$GITHUB_WORKSPACE/tc/bin:$PATH"
           export ARCH=arm64
           export SUBARCH=arm64
-          export CC="clang"
-          export CLANG_TRIPLE="aarch64-linux-gnu-"
-          export CROSS_COMPILE="aarch64-linux-android-"
-          export CROSS_COMPILE_COMPAT="arm-linux-androideabi-"
-
+          
+          # Ganti gki_defconfig sesuai nama defconfig kernelmu
           make -j$(nproc --all) O=out ARCH=arm64 gki_defconfig
           make -j$(nproc --all) O=out ARCH=arm64 \
-            CC=clang \
-            LD=ld.lld \
+            CC="ccache clang" \
             AR=llvm-ar \
             NM=llvm-nm \
             OBJCOPY=llvm-objcopy \
             OBJDUMP=llvm-objdump \
             STRIP=llvm-strip \
-            Image.gz
-
-      - name: Package with AnyKernel3
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            Image
+            
+      - name: Package AnyKernel3
         run: |
-          git clone https://github.com/osm0sis/AnyKernel3.git AK3
-          # Sesuaikan konfigurasi device marble di anykernel.sh
-          sed -i 's/device.name1=.*/device.name1=marble/' AK3/anykernel.sh
-          sed -i 's/device.name2=.*/device.name2=marblein/' AK3/anykernel.sh
-          
-          # Salin file output Image.gz
-          cp kernel-source/out/arch/arm64/boot/Image.gz AK3/
+          git clone https://github.com/osm0sis/AnyKernel3.git -b master AK3
           cd AK3
-          zip -r9 ../PocoF5-Marble-Kernel-KSU-SUSFS.zip * -x .git README.md *placeholder
+          rm -rf .git
+          # Sesuaikan script AnyKernel3 khusus untuk Poco F5 (marble)
+          sed -i 's/device.name1=.*/device.name1=marble/' anykernel.sh
+          sed -i 's/device.name2=.*/device.name2=marblein/' anykernel.sh
+          
+          # Auto-grab Image (antisipasi jika compiler menghasilkan .gz)
+          cp ../kernel/out/arch/arm64/boot/Image . || cp ../kernel/out/arch/arm64/boot/Image.gz .
+          zip -r9 ../Dewa-SapuJagat-Marble.zip *
 
-      - name: Upload Kernel Artifact
+      - name: Upload Build
         uses: actions/upload-artifact@v4
         with:
-          name: PocoF5-Marble-Kernel
-          path: PocoF5-Marble-Kernel-KSU-SUSFS.zip
+          name: Dewa-SapuJagat-Marble-Kernel
+          path: Dewa-SapuJagat-Marble.zip
           
