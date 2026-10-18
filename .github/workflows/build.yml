@@ -1,201 +1,138 @@
-#!/usr/bin/env bash
-# file: build_marble_templar.sh
-# target: POCO F5 / Redmi Note 12 Turbo (marble / marblein)
-# kernel: GKI 5.10 — Steambot12/Templar-Kernel-GKI-5.10
-# features: KernelSU-Next (kprobe) · SuSFS v2.x · BakaSU tracepoint support
-#           signal/RF optimizations · GPS/NMEA retention
-# env: Debian/Ubuntu x86_64, 16GB RAM min, 30GB disk
-# toolchain: LLVM Clang (AOSP prebuilt or Neutron)
+# file: .github/workflows/build-templar.yml
+# repo: fork lu dari Steambot12/Templar-Kernel-GKI-5.10
+# trigger: manual (workflow_dispatch) + push ke main
+# target: POCO F5 / Redmi Note 12 Turbo (marble) — GKI 5.10
+# output: AnyKernel3 zip di artifact dan release
 
-set -euo pipefail
+name: Build Templar Kernel (marble)
 
-WORKDIR="${HOME}/templar-build"
-KERNEL_REPO="https://github.com/Steambot12/Templar-Kernel-GKI-5.10.git"
-KERNEL_BRANCH="main"   # adjust to the branch that carries marble support
-DEVICE_DEFCONFIG="marble_defconfig"  # vendor defconfig inside arch/arm64/configs/vendor/
-ANYKERNEL_REPO="https://github.com/osm0sis/AnyKernel3.git"
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
 
-# ---- toolchain ----
-CLANG_DIR="${WORKDIR}/toolchain/clang"
-CLANG_URL="https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/20250601/neutron-clang-20250601.tar.zst"
-# or use AOSP prebuilt: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+/refs/heads/main/clang-r547379
+permissions:
+  contents: write
 
-mkdir -p "${WORKDIR}"
-cd "${WORKDIR}"
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          repository: Steambot12/Templar-Kernel-GKI-5.10
+          ref: main
+          path: kernel
+          fetch-depth: 1
 
-echo "[*] stage 1 — clone kernel"
-if [[ ! -d Templar-Kernel-GKI-5.10 ]]; then
-    git clone --depth=1 -b "${KERNEL_BRANCH}" "${KERNEL_REPO}"
-fi
-cd Templar-Kernel-GKI-5.10
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential ccache curl flex \
+            g++-multilib gcc-multilib git gnupg gperf imagemagick lib32readline-dev \
+            lib32z1-dev libelf-dev liblz4-tool libsdl1.2-dev libssl-dev \
+            libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools \
+            xsltproc zip zlib1g-dev python3 python-is-python3
 
-echo "[*] stage 2 — KernelSU Next (legacy / non-GKI-compatible setup)"
-curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
+      - name: Setup KernelSU-Next (legacy / non-GKI)
+        run: |
+          cd kernel
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
 
-echo "[*] stage 3 — SuSFS patch"
-# SuSFS patches live in susfs4ksu; clone and apply the 5.10 GKI patch
-if [[ ! -d ../susfs4ksu ]]; then
-    git clone --depth=1 https://github.com/Simonpunk/susfs4ksu.git ../susfs4ksu
-fi
-SUSFS_PATCH=$(find ../susfs4ksu/kernel_patches -name '50_add_susfs_in_gki-5.10*.patch' | head -n1)
-if [[ -z "${SUSFS_PATCH}" ]]; then
-    echo "[!] no 5.10 SuSFS patch found — check susfs4ksu tree"
-    exit 1
-fi
-cp "${SUSFS_PATCH}" ./common/
-( cd common && patch -p1 < "$(basename "${SUSFS_PATCH}")" ) || {
-    echo "[!] SuSFS patch failed — manual fix required. common/ is left dirty for inspection."
-    exit 1
-}
+      - name: Apply SuSFS patch (GKI 5.10)
+        run: |
+          cd kernel
+          git clone --depth=1 https://github.com/Simonpunk/susfs4ksu.git ../susfs
+          SUSFS_PATCH=$(find ../susfs/kernel_patches -name '50_add_susfs_in_gki-5.10*.patch' | head -n1)
+          if [[ -z "$SUSFS_PATCH" ]]; then
+            echo "no 5.10 SuSFS patch found"
+            exit 1
+          fi
+          cp "$SUSFS_PATCH" ./common/
+          cd common
+          patch -p1 < "$(basename "$SUSFS_PATCH")" || {
+            echo "susfs patch reject — inspect common/ for hunks"
+            exit 1
+          }
 
-echo "[*] stage 4 — BakaSU tracepoint support"
-# BakaSU hooks into the tracepoint syscall redirect path.
-# The kernel must expose the tracepoint infrastructure. BakaSU's
-# userspace manager installs the module; the kernel only needs
-# CONFIG_KSU + the tracepoint hook enabled.
-# If the Templar source does not carry BakaSU-specific hooks, the
-# KernelSU-Next kprobe path is compatible with BakaSU's manager
-# (BakaSU is a KernelSU fork and reads the same /proc interface).
-# Add the BakaSU kernel-side flag if the source supports it:
-cat >> arch/arm64/configs/vendor/"${DEVICE_DEFCONFIG}" <<'EOF'
-# BakaSU / KernelSU-Next compatibility
-CONFIG_KSU=y
-CONFIG_KSU_KPROBE_HOOKS=y
-CONFIG_KSU_TRACEPOINT_HOOK=y   # only if the source carries the tracepoint patch
-CONFIG_KPROBES=y
-CONFIG_KPROBE_EVENTS=y
-CONFIG_MODULES=y
-EOF
+      - name: Clone toolchain (Neutron Clang)
+        run: |
+          mkdir -p toolchain
+          cd toolchain
+          curl -L "https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/20250601/neutron-clang-20250601.tar.zst" \
+            | tar --zstd -xf - --strip-components=1
 
-echo "[*] stage 5 — signal / GPS / network config hardening"
-# These are defconfig-level. They do not touch vendor RF calibration;
-# they tune the kernel's network stack and GPS keep-alive behavior.
-cat >> arch/arm64/configs/vendor/"${DEVICE_DEFCONFIG}" <<'EOF'
-# --- signal / RF stack ---
-CONFIG_NET_SCH_FQ_CODEL=y
-CONFIG_NET_SCH_FQ=y
-CONFIG_TCP_CONG_BBR=y
-CONFIG_TCP_CONG_CUBIC=y
-CONFIG_DEFAULT_TCP_CONG="bbr"
-CONFIG_NET_IPV6=y
-CONFIG_NET_IP_ADVANCED_ROUTER=y
-CONFIG_NETFILTER=y
-CONFIG_NF_CONNTRACK=y
-# larger socket buffers for carrier aggregation / 5G
-CONFIG_NET_CORE=y
-CONFIG_WIRELESS=y
-CONFIG_CFG80211=y
-CONFIG_MAC80211=y
-# --- GPS / GNSS ---
-CONFIG_GPS=y                    # if the source exposes a GPS config symbol
-CONFIG_GNSS=y
-CONFIG_GNSS_CMDLINE_SERIAL=y    # fallback serial GNSS path
-CONFIG_GNSS_SIRF_SERIAL=y
-CONFIG_GNSS_UBX_SERIAL=y
-# keep GNSS wakeups alive during suspend
-CONFIG_PM_WAKELOCKS=y
-CONFIG_PM_WAKELOCKS_LIMIT=0
-CONFIG_PM_SLEEP=y
-CONFIG_SUSPEND=y
-# --- scheduler / gaming (BORE is strongly recommended by Templar) ---
-CONFIG_SCHED_BORE=y
-CONFIG_SCHED_CLASS_EXT=y
-EOF
+      - name: Build kernel
+        run: |
+          cd kernel
+          export PATH="$GITHUB_WORKSPACE/toolchain/bin:$PATH"
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CC=clang
+          export LD=ld.lld
+          export AR=llvm-ar
+          export NM=llvm-nm
+          export OBJCOPY=llvm-objcopy
+          export OBJDUMP=llvm-objdump
+          export STRIP=llvm-strip
+          export LLVM_IAS=1
 
-# Note: if the defconfig already defines any of these, the duplicate
-# lines are harmless — the last definition wins in kbuild. If a symbol
-# is unknown, `make olddefconfig` will drop it silently.
+          # defconfig marble — sesuaikan kalau nama file beda
+          make O=out ARCH=arm64 vendor/marble_defconfig
+          make O=out ARCH=arm64 olddefconfig
 
-echo "[*] stage 6 — toolchain + build"
-if [[ ! -d "${CLANG_DIR}" ]]; then
-    mkdir -p "${CLANG_DIR}"
-    # replace with your preferred Clang archive; Neutron is used by Templar CI
-    curl -L "${CLANG_URL}" | tar --zstd -xf - -C "${CLANG_DIR}" --strip-components=1
-fi
+          make -j$(nproc) O=out \
+            CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm \
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
+            LLVM_IAS=1 Image.gz
 
-export PATH="${CLANG_DIR}/bin:${PATH}"
-export ARCH=arm64
-export SUBARCH=arm64
-export CROSS_COMPILE=aarch64-linux-gnu-
-export CC=clang
-export LD=ld.lld
-export AR=llvm-ar
-export NM=llvm-nm
-export OBJCOPY=llvm-objcopy
-export OBJDUMP=llvm-objdump
-export STRIP=llvm-strip
-export LLVM_IAS=1
+      - name: Package AnyKernel3
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git anykernel
+          cd anykernel
+          cp ../kernel/out/arch/arm64/boot/Image.gz ./Image.gz
+          cat > anykernel.sh <<'EOF'
+          properties() { '
+          kernel.string=Templar GKI 5.10 — KSU-Next + SuSFS
+          do.devicecheck=1
+          do.modules=1
+          do.systemless=0
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=marble
+          device.name2=marblein
+          device.name3=POCO F5
+          device.name4=Redmi Note 12 Turbo
+          supported.versions=13-16
+          '; }
 
-# clean + defconfig
-make O=out ARCH=arm64 "${DEVICE_DEFCONFIG}"
-make O=out ARCH=arm64 olddefconfig
+          BLOCK=boot;
+          IS_SLOT_DEVICE=auto;
+          RAMDISK_COMPRESSION=auto;
+          RAMDISK_PATCH_LEVEL=auto;
+          NO_BLOCK_DISPLAY=1;
 
-# GKI builds usually require the gki_defconfig base. If the device defconfig
-# is a fragment, merge it:
-# make O=out ARCH=arm64 gki_defconfig
-# scripts/kconfig/merge_config.sh -O out out/.config arch/arm64/configs/vendor/"${DEVICE_DEFCONFIG}"
+          . tools/ak3-core.sh;
+          split_boot;
+          flash_boot;
+          EOF
 
-echo "[*] building — -j$(nproc)"
-make -j"$(nproc)" \
-    O=out \
-    ARCH=arm64 \
-    CC=clang \
-    LD=ld.lld \
-    AR=llvm-ar \
-    NM=llvm-nm \
-    OBJCOPY=llvm-objcopy \
-    OBJDUMP=llvm-objdump \
-    STRIP=llvm-strip \
-    LLVM_IAS=1 \
-    DTC_EXT=dtc \
-    Image.gz
+          rm -rf .git
+          zip -r9 "../Templar-marble-KSUN-SuSFS-$(date +%Y%m%d).zip" . -x '*.git*'
 
-# For GKI, you may also need:
-# make ... Image.lz4   (or Image.gz depending on boot image format)
-# marble uses Image.gz in most HyperOS / AOSP boot images.
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Templar-marble-KSUN-SuSFS
+          path: Templar-marble-KSUN-SuSFS-*.zip
 
-echo "[*] stage 7 — AnyKernel3 package"
-cd "${WORKDIR}"
-if [[ ! -d AnyKernel3 ]]; then
-    git clone --depth=1 "${ANYKERNEL_REPO}"
-fi
-cd AnyKernel3
-# overwrite the kernel payload
-cp ../Templar-Kernel-GKI-5.10/out/arch/arm64/boot/Image.gz ./Image.gz
-# marble-specific anykernel.sh — edit the device check and partition layout
-cat > anykernel.sh <<'AKEOF'
-### AnyKernel3 Ramdisk Mod Script
-## osm0sis @ xda-developers
-
-properties() { '
-kernel.string=Templar-Kernel-GKI-5.10 — KernelSU-Next + SuSFS + BakaSU
-do.devicecheck=1
-do.modules=1
-do.systemless=0
-do.cleanup=1
-do.cleanuponabort=0
-device.name1=marble
-device.name2=marblein
-device.name3=Redmi Note 12 Turbo
-device.name4=POCO F5
-supported.versions=13-16
-supported.patchlevels=
-'; }
-
-BLOCK=boot;
-IS_SLOT_DEVICE=auto;
-RAMDISK_COMPRESSION=auto;
-RAMDISK_PATCH_LEVEL=auto;
-NO_BLOCK_DISPLAY=1;
-
-. tools/ak3-core.sh;
-
-split_boot;
-flash_boot;
-AKEOF
-
-rm -rf .git
-zip -r9 "../Templar-marble-KSUN-SuSFS-BakaSU-$(date +%Y%m%d).zip" . -x '*.git*' 'README.md'
-
-echo "[*] done — flashable zip in ${WORKDIR}/"
-ls -lh "${WORKDIR}"/*.zip
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        if: github.ref == 'refs/heads/main'
+        with:
+          tag_name: build-$(date +%Y%m%d-%H%M)
+          files: Templar-marble-KSUN-SuSFS-*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
