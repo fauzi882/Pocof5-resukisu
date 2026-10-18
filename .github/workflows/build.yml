@@ -3,6 +3,9 @@ name: Dewa Coding - Mode Sapu Jagat (Poco F5)
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-kernel:
     runs-on: ubuntu-latest
@@ -36,35 +39,34 @@ jobs:
 
       - name: Clone Kernel Source
         run: |
-          # Ganti URL ini dengan repositori source kernel marble kamu
-          # Contoh menggunakan source base LineageOS
+          # Menggunakan source base LineageOS Resmi untuk POCO F5 (marble)
           git clone --depth=1 https://github.com/LineageOS/android_kernel_xiaomi_sm7475.git -b lineage-21 kernel
 
       - name: Setup KernelSU Next & SUSFS
         run: |
-          cd kernel
-          # 1. Tarik KSU Next
+          # 1. Jalankan script installer resmi KernelSU Next dari root workspace
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
           
-          # 2. Tarik SUSFS
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b kernel-5.10 ../susfs_data
+          # 2. Tarik SUSFS dengan bypass autentikasi GitLab prompt
+          git config --global url."https://gitlab-ci-token:nopassword@gitlab.com/".insteadOf "https://gitlab.com/"
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b kernel-5.10 susfs_data
           
-          # 3. Inject patch kernel level dari SUSFS
+          # 3. Inject patch kernel level dari SUSFS ke dalam direktori kernel
+          cd kernel
           cp ../susfs_data/kernel_patches/fs/* fs/
           cp ../susfs_data/kernel_patches/include/linux/* include/linux/
           
           # 4. Patch sinkronisasi KSU Next dengan SUSFS
           cd KernelSU-Next
-          patch -p1 < ../../susfs_data/KernelSU_Next_Add_Susfs_Support_For_Next.patch || echo "Patch sudah aman."
+          patch -p1 < ../../susfs_data/KernelSU_Next_Add_Susfs_Support_For_Next.patch || echo "Patch sudah aman atau terlewat."
           cd ..
 
       - name: Tweak Defconfig & Anti Detect
         run: |
           cd kernel
-          # Ganti "gki_defconfig" di bawah ini jika source kamu memakai nama defconfig berbeda (misal: vendor/marble_defconfig)
           DEFCONFIG="arch/arm64/configs/gki_defconfig"
           
-          # Bypass konfigurasi
+          # Bypass konfigurasi KSU & SUSFS
           echo "CONFIG_KSU=y" >> $DEFCONFIG
           echo "CONFIG_KSU_SUSFS=y" >> $DEFCONFIG
           echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> $DEFCONFIG
@@ -84,8 +86,10 @@ jobs:
           export ARCH=arm64
           export SUBARCH=arm64
           
-          # Ganti gki_defconfig sesuai nama defconfig kernelmu
+          # Compile Konfigurasi Defconfig
           make -j$(nproc --all) O=out ARCH=arm64 gki_defconfig
+          
+          # Mulai Proses Kompilasi Kernel Utama
           make -j$(nproc --all) O=out ARCH=arm64 \
             CC="ccache clang" \
             AR=llvm-ar \
@@ -102,11 +106,12 @@ jobs:
           git clone https://github.com/osm0sis/AnyKernel3.git -b master AK3
           cd AK3
           rm -rf .git
-          # Sesuaikan script AnyKernel3 khusus untuk Poco F5 (marble)
+          
+          # Sesuaikan script AnyKernel3 khusus untuk Poco F5 (marble / marblein)
           sed -i 's/device.name1=.*/device.name1=marble/' anykernel.sh
           sed -i 's/device.name2=.*/device.name2=marblein/' anykernel.sh
           
-          # Auto-grab Image (antisipasi jika compiler menghasilkan .gz)
+          # Ambil output file Image kompilasi
           cp ../kernel/out/arch/arm64/boot/Image . || cp ../kernel/out/arch/arm64/boot/Image.gz .
           zip -r9 ../Dewa-SapuJagat-Marble.zip *
 
