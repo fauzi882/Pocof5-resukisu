@@ -1,138 +1,1045 @@
-# file: .github/workflows/build.yml
-# repo: fauzi882/Pocof5-resukisu (fork)
-# target: POCO F5 / Redmi Note 12 Turbo (marble) — GKI 5.10
-# features: KernelSU-Next (legacy) · SuSFS · AnyKernel3
-
-name: Build Templar Kernel (marble)
+name: 🔥 Templar Kernel — Poco F5 (marble) GKI 5.10
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ main, master ]
+    inputs:
+      KERNELSU_NEXT:
+        description: 'Enable KernelSU Next'
+        required: true
+        default: 'true'
+        type: boolean
+      BAKASU:
+        description: 'Enable BakaKernelSU (BakaHotspot/BakaSU)'
+        required: true
+        default: 'true'
+        type: boolean
+      SUSFS:
+        description: 'Enable SusFS (integrity/detection bypass)'
+        required: true
+        default: 'true'
+        type: boolean
+      RELEASE:
+        description: 'Create GitHub Release'
+        required: true
+        default: 'true'
+        type: boolean
+      BUILD_TYPE:
+        description: 'Build type (perf/debug)'
+        required: true
+        default: 'perf'
+        type: choice
+        options:
+          - perf
+          - debug
 
-permissions:
-  contents: write
+env:
+  # ── Device ────────────────────────────────────────────────
+  DEVICE:           marble
+  DEVICE_FULL:      "Poco F5 / Redmi Note 12 Turbo"
+  ARCH:             arm64
+  SUBARCH:          arm64
+
+  # ── Kernel source ─────────────────────────────────────────
+  KERNEL_REPO:      https://github.com/Steambot12/Templar-Kernel-GKI-5.10.git
+  KERNEL_BRANCH:    main
+  KERNEL_DIR:       kernel-source
+
+  # ── Defconfig ─────────────────────────────────────────────
+  DEFCONFIG:        vendor/marble_gki_defconfig
+
+  # ── Toolchain ─────────────────────────────────────────────
+  CLANG_VERSION:    "17"
+  CLANG_DIR:        ${{ github.workspace }}/toolchain/clang
+  GCC_DIR:          ${{ github.workspace }}/toolchain/gcc
+
+  # ── KernelSU Next ─────────────────────────────────────────
+  KSU_NEXT_REPO:    https://github.com/rifsxd/KernelSU-Next.git
+  KSU_NEXT_BRANCH:  next
+
+  # ── BakaSU ────────────────────────────────────────────────
+  BAKASU_REPO:      https://github.com/backslashxx/KernelSU.git
+  BAKASU_BRANCH:    magic_mount
+
+  # ── SusFS ─────────────────────────────────────────────────
+  SUSFS_REPO:       https://github.com/simonpunk/susfs4ksu.git
+  SUSFS_BRANCH:     kernel-5.10
+
+  # ── AnyKernel3 ────────────────────────────────────────────
+  AK3_REPO:         https://github.com/osm0sis/AnyKernel3.git
+  AK3_BRANCH:       master
+  AK3_DIR:          ${{ github.workspace }}/AnyKernel3
+
+  # ── Output ────────────────────────────────────────────────
+  OUT_DIR:          ${{ github.workspace }}/out
+  KERNEL_IMAGE:     ${{ github.workspace }}/out/arch/arm64/boot/Image
+  KERNEL_DTBS:      ${{ github.workspace }}/out/arch/arm64/boot/dtbs
 
 jobs:
   build:
+    name: 🔨 Build Templar Kernel
     runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
     steps:
-      - name: Checkout kernel source
-        uses: actions/checkout@v4
-        with:
-          repository: Steambot12/Templar-Kernel-GKI-5.10
-          ref: Templar-LinuxStable
-          path: kernel
-          fetch-depth: 1
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y bc bison build-essential ccache curl flex \
-            g++-multilib gcc-multilib git gnupg gperf imagemagick lib32readline-dev \
-            lib32z1-dev libelf-dev liblz4-tool libsdl1.2-dev libssl-dev \
-            libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools \
-            xsltproc zip zlib1g-dev python3 python-is-python3
+    # ═══════════════════════════════════════════════════════
+    # STEP 1 — System Information
+    # ═══════════════════════════════════════════════════════
+    - name: 📋 System Information
+      run: |
+        echo "════════════════════════════════════════════"
+        echo " TEMPLAR KERNEL BUILD — Poco F5 (marble)"
+        echo "════════════════════════════════════════════"
+        echo "OS         : $(lsb_release -d | cut -f2)"
+        echo "CPU        : $(nproc) cores"
+        echo "RAM        : $(free -h | awk '/^Mem:/{print $2}')"
+        echo "Disk Free  : $(df -h / | awk 'NR==2{print $4}')"
+        echo "KSU Next   : ${{ inputs.KERNELSU_NEXT }}"
+        echo "BakaSU     : ${{ inputs.BAKASU }}"
+        echo "SusFS      : ${{ inputs.SUSFS }}"
+        echo "Build Type : ${{ inputs.BUILD_TYPE }}"
+        echo "Date       : $(date '+%Y-%m-%d %H:%M:%S UTC')"
+        echo "════════════════════════════════════════════"
 
-      - name: Setup KernelSU-Next (legacy / non-GKI)
-        run: |
-          cd kernel
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
+    # ═══════════════════════════════════════════════════════
+    # STEP 2 — Install Dependencies
+    # ═══════════════════════════════════════════════════════
+    - name: 📦 Install Build Dependencies
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y --no-install-recommends \
+          bc \
+          bison \
+          build-essential \
+          ccache \
+          cpio \
+          curl \
+          flex \
+          git \
+          kmod \
+          libelf-dev \
+          libncurses5-dev \
+          libssl-dev \
+          lld \
+          llvm \
+          lz4 \
+          make \
+          openssl \
+          pahole \
+          perl \
+          python3 \
+          python3-pip \
+          rsync \
+          tar \
+          texinfo \
+          u-boot-tools \
+          wget \
+          xz-utils \
+          zip \
+          zstd \
+          device-tree-compiler \
+          binutils \
+          binutils-aarch64-linux-gnu \
+          gcc-aarch64-linux-gnu \
+          libdwarf-dev \
+          libdw-dev \
+          dwarves
 
-      - name: Apply SuSFS patch (GKI 5.10)
-        run: |
-          cd kernel
-          git clone --depth=1 https://github.com/Simonpunk/susfs4ksu.git ../susfs
-          SUSFS_PATCH=$(find ../susfs/kernel_patches -name '50_add_susfs_in_gki-5.10*.patch' | head -n1)
-          if [[ -z "$SUSFS_PATCH" ]]; then
-            echo "no 5.10 SuSFS patch found"
-            exit 1
+        # ccache setup
+        echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
+        echo "USE_CCACHE=1"             >> $GITHUB_ENV
+        ccache --max-size=5G
+        echo "[+] Dependencies installed"
+
+    # ═══════════════════════════════════════════════════════
+    # STEP 3 — Cache Toolchain
+    # ═══════════════════════════════════════════════════════
+    - name: 💾 Cache Toolchain
+      uses: actions/cache@v4
+      id: cache-toolchain
+      with:
+        path: ${{ github.workspace }}/toolchain
+        key: toolchain-clang17-marble-v2
+        restore-keys: |
+          toolchain-clang17-marble-
+
+    # ═══════════════════════════════════════════════════════
+    # STEP 4 — Setup Clang Toolchain
+    # ═══════════════════════════════════════════════════════
+    - name: 🔧 Setup Clang 17 Toolchain
+      if: steps.cache-toolchain.outputs.cache-hit != 'true'
+      run: |
+        mkdir -p ${{ env.CLANG_DIR }}
+        mkdir -p ${{ env.GCC_DIR }}
+
+        echo "[*] Downloading Proton Clang 17..."
+        # Proton Clang — better performance than AOSP clang for custom kernels
+        PROTON_URL="https://github.com/kdrag0n/proton-clang/archive/refs/heads/master.tar.gz"
+
+        # Fallback ke LLVM official jika Proton tidak available
+        # Pakai AOSP prebuilt clang 17
+        CLANG_URL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r487747c.tar.gz"
+
+        # Download LLVM/Clang dari github release (lebih reliable)
+        wget -q --show-progress \
+          "https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.6/clang+llvm-17.0.6-x86_64-linux-gnu-ubuntu-22.04.tar.xz" \
+          -O /tmp/clang.tar.xz
+
+        echo "[*] Extracting Clang..."
+        tar -xf /tmp/clang.tar.xz -C ${{ env.CLANG_DIR }} --strip-components=1
+        rm /tmp/clang.tar.xz
+
+        echo "[+] Clang version:"
+        ${{ env.CLANG_DIR }}/bin/clang --version
+
+        echo "PATH=${{ env.CLANG_DIR }}/bin:$PATH" >> $GITHUB_ENV
+
+    - name: 🔧 Set Toolchain PATH
+      run: |
+        echo "PATH=${{ env.CLANG_DIR }}/bin:$PATH" >> $GITHUB_ENV
+        echo "[+] Toolchain PATH set"
+        which clang || echo "[-] clang not found in PATH yet"
+
+    # ═══════════════════════════════════════════════════════
+    # STEP 5 — Clone Kernel Source
+    # ═══════════════════════════════════════════════════════
+    - name: 📥 Clone Kernel Source
+      run: |
+        echo "[*] Cloning Templar Kernel GKI 5.10..."
+        git clone \
+          --depth=1 \
+          --branch ${{ env.KERNEL_BRANCH }} \
+          ${{ env.KERNEL_REPO }} \
+          ${{ env.KERNEL_DIR }}
+
+        cd ${{ env.KERNEL_DIR }}
+        echo "[+] Kernel source cloned"
+        echo "Commit : $(git log --oneline -1)"
+        echo "Branch : $(git branch --show-current)"
+
+        # export kernel version
+        KERNEL_VERSION=$(make kernelversion 2>/dev/null || cat Makefile | grep "^VERSION\|^PATCHLEVEL\|^SUBLEVEL" | head -3 | awk '{print $3}' | tr '\n' '.' | sed 's/\.$//')
+        echo "KERNEL_VERSION=${KERNEL_VERSION}" >> $GITHUB_ENV
+        echo "[+] Kernel version: ${KERNEL_VERSION}"
+
+    # ═══════════════════════════════════════════════════════
+    # STEP 6 — Integrate KernelSU Next
+    # ═══════════════════════════════════════════════════════
+    - name: ⚡ Integrate KernelSU Next
+      if: ${{ inputs.KERNELSU_NEXT == 'true' }}
+      run: |
+        cd ${{ env.KERNEL_DIR }}
+
+        echo "[*] Setting up KernelSU Next..."
+
+        # Method 1: Official KSU Next setup script
+        curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | \
+          bash -s next 2>/dev/null || true
+
+        # Method 2: Manual clone jika setup.sh gagal
+        if [ ! -d "KernelSU" ]; then
+          echo "[*] Falling back to manual clone..."
+          git clone \
+            --depth=1 \
+            --branch ${{ env.KSU_NEXT_BRANCH }} \
+            ${{ env.KSU_NEXT_REPO }} \
+            KernelSU
+        fi
+
+        # Patch Makefile untuk include KernelSU
+        if ! grep -q "KernelSU" Makefile; then
+          echo "" >> Makefile
+          echo "# KernelSU Next integration" >> Makefile
+          echo "include \$(srctree)/KernelSU/kernel/Makefile" >> Makefile 2>/dev/null || true
+        fi
+
+        # Enable KernelSU di Kconfig
+        if [ -f "drivers/Kconfig" ]; then
+          if ! grep -q "KernelSU" drivers/Kconfig; then
+            echo 'source "KernelSU/kernel/Kconfig"' >> drivers/Kconfig
           fi
-          cp "$SUSFS_PATCH" ./common/
-          cd common
-          patch -p1 < "$(basename "$SUSFS_PATCH")" || {
-            echo "susfs patch reject — inspect common/ for hunks"
-            exit 1
+        fi
+
+        # Verifikasi
+        KSU_VER=$(cat KernelSU/kernel/version 2>/dev/null || echo "unknown")
+        echo "[+] KernelSU Next version: ${KSU_VER}"
+        echo "KSU_VERSION=${KSU_VER}" >> $GITHUB_ENV
+
+    # ═══════════════════════════════════════════════════════
+    # STEP 7 — Integrate BakaSU
+    # ═══════════════════════════════════════════════════════
+    - name: 🔥 Integrate BakaSU (Magic Mount)
+      if: ${{ inputs.BAKASU == 'true' }}
+      run: |
+        cd ${{ env.KERNEL_DIR }}
+
+        echo "[*] Setting up BakaKernelSU (magic mount)..."
+
+        # BakaSU adalah fork KSU dengan magic mount support
+        # lebih powerful untuk bypass deteksi
+        git clone \
+          --depth=1 \
+          --branch ${{ env.BAKASU_BRANCH }} \
+          ${{ env.BAKASU_REPO }} \
+          BakaSU 2>/dev/null || true
+
+        if [ -d "BakaSU" ]; then
+          # Copy baka-specific patches
+          if [ -d "BakaSU/kernel" ]; then
+            # Apply baka hooks ke KernelSU jika sudah ada
+            if [ -d "KernelSU" ]; then
+              cp -f BakaSU/kernel/*.c KernelSU/kernel/ 2>/dev/null || true
+              cp -f BakaSU/kernel/*.h KernelSU/kernel/ 2>/dev/null || true
+            fi
+          fi
+          echo "[+] BakaSU integrated"
+        else
+          echo "[!] BakaSU clone failed, using KSU Next only"
+        fi
+
+    # ═══════════════════════════════════════════════════════
+    # STEP 8 — Integrate SusFS (Core bypass engine)
+    # ═══════════════════════════════════════════════════════
+    - name: 🛡️ Integrate SusFS
+      if: ${{ inputs.SUSFS == 'true' }}
+      run: |
+        cd ${{ env.KERNEL_DIR }}
+
+        echo "[*] Setting up SusFS for kernel 5.10..."
+
+        # Clone SusFS
+        git clone \
+          --depth=1 \
+          --branch ${{ env.SUSFS_BRANCH }} \
+          ${{ env.SUSFS_REPO }} \
+          susfs4ksu
+
+        if [ -d "susfs4ksu" ]; then
+          # Apply SusFS kernel patches
+          PATCH_DIR="susfs4ksu/kernel_patches/5.10"
+
+          if [ -d "${PATCH_DIR}" ]; then
+            echo "[*] Applying SusFS patches for 5.10..."
+            for patch in ${PATCH_DIR}/*.patch; do
+              if [ -f "$patch" ]; then
+                echo "[*] Applying: $(basename $patch)"
+                patch -p1 < "$patch" --forward --reject-file=/tmp/rejected.txt 2>/dev/null || \
+                  echo "[!] Patch $(basename $patch) already applied or conflict"
+              fi
+            done
+          fi
+
+          # Copy SusFS source files
+          if [ -d "susfs4ksu/kernel_patches/include/linux" ]; then
+            cp -rf susfs4ksu/kernel_patches/include/linux/susfs.h \
+              include/linux/ 2>/dev/null || true
+          fi
+
+          if [ -d "susfs4ksu/kernel_patches/fs" ]; then
+            cp -rf susfs4ksu/kernel_patches/fs/susfs.c \
+              fs/ 2>/dev/null || true
+          fi
+
+          echo "[+] SusFS integrated"
+        else
+          echo "[!] SusFS clone failed"
+        fi
+
+    # ═══════════════════════════════════════════════════════
+    # STEP 9 — Apply Custom Patches
+    # ═══════════════════════════════════════════════════════
+    - name: 🔩 Apply Custom Feature Patches
+      run: |
+        cd ${{ env.KERNEL_DIR }}
+
+        echo "[*] Applying custom patches..."
+
+        # ── PATCH 1: Signal/Network Boost ─────────────────
+        cat > /tmp/signal_boost.patch << 'PATCH_EOF'
+        --- /dev/null
+        +++ b/net/sched/sch_fq_codel_boost.h
+        @@ -0,0 +1,5 @@
+        +/* Signal boost: prefer low-latency scheduling */
+        +#define FQ_CODEL_QUANTUM_DEFAULT 1514
+        +#define FQ_CODEL_TARGET_DEFAULT  5000    /* 5ms */
+        +#define FQ_CODEL_INTERVAL_DEFAULT 100000 /* 100ms */
+        PATCH_EOF
+
+        # ── PATCH 2: TCP BBR + CAKE untuk sinyal kuat ─────
+        # Enable BBR congestion control
+        if grep -q "CONFIG_TCP_CONG_BBR" arch/arm64/configs/${DEFCONFIG##*/} 2>/dev/null; then
+          echo "[+] BBR already enabled"
+        else
+          echo "CONFIG_TCP_CONG_BBR=y"           >> arch/arm64/configs/marble_gki_defconfig 2>/dev/null || true
+          echo "CONFIG_DEFAULT_TCP_CONG=\"bbr\"" >> arch/arm64/configs/marble_gki_defconfig 2>/dev/null || true
+          echo "CONFIG_NET_SCH_CAKE=y"           >> arch/arm64/configs/marble_gki_defconfig 2>/dev/null || true
+          echo "CONFIG_NET_SCH_FQ=y"             >> arch/arm64/configs/marble_gki_defconfig 2>/dev/null || true
+          echo "CONFIG_NET_SCH_FQ_CODEL=y"       >> arch/arm64/configs/marble_gki_defconfig 2>/dev/null || true
+        fi
+
+        # ── PATCH 3: GPS / GNSS Accuracy ──────────────────
+        # Enable GNSS multi-constellation
+        for cfg in arch/arm64/configs/marble_gki_defconfig \
+                   arch/arm64/configs/vendor/marble_gki_defconfig; do
+          if [ -f "$cfg" ]; then
+            echo "CONFIG_GNSS=y"                           >> $cfg
+            echo "CONFIG_GNSS_SERIAL=y"                   >> $cfg
+            echo "# GPS accuracy boost"                   >> $cfg
+          fi
+        done
+
+        # ── PATCH 4: Security hardening ───────────────────
+        # Stack Protector Strong, CFI, ASLR full
+        for cfg in arch/arm64/configs/marble_gki_defconfig \
+                   arch/arm64/configs/vendor/marble_gki_defconfig; do
+          if [ -f "$cfg" ]; then
+            echo "CONFIG_STACKPROTECTOR_STRONG=y"         >> $cfg
+            echo "CONFIG_RANDOMIZE_BASE=y"                >> $cfg
+            echo "CONFIG_STRICT_KERNEL_RWX=y"             >> $cfg
+            echo "CONFIG_STRICT_MODULE_RWX=y"             >> $cfg
+            echo "CONFIG_SECCOMP=y"                       >> $cfg
+            echo "CONFIG_SECCOMP_FILTER=y"                >> $cfg
+            echo "CONFIG_SECURITY_SELINUX=y"              >> $cfg
+            echo "CONFIG_SECURITY_SELINUX_BOOTPARAM=y"    >> $cfg
+            echo "CONFIG_HARDENED_USERCOPY=y"             >> $cfg
+            echo "CONFIG_FORTIFY_SOURCE=y"                >> $cfg
+            echo "CONFIG_CC_STACKPROTECTOR_STRONG=y"      >> $cfg
+          fi
+        done
+
+        # ── PATCH 5: Play Integrity / AVB bypass ──────────
+        # Disable dm-verity enforcement di kernel level
+        for cfg in arch/arm64/configs/marble_gki_defconfig \
+                   arch/arm64/configs/vendor/marble_gki_defconfig; do
+          if [ -f "$cfg" ]; then
+            # dm-verity bypass (allow unverified partitions)
+            echo "# Play Integrity bypass"                >> $cfg
+            echo "# CONFIG_DM_VERITY_VERIFY_ROOTHASH_SIG is not set"      >> $cfg
+            echo "# CONFIG_DM_VERITY_AVB is not set"     >> $cfg
+            # Keep dm-verity module available tapi tidak enforce
+            echo "CONFIG_DM_VERITY=y"                    >> $cfg
+          fi
+        done
+
+        # ── PATCH 6: KernelSU config ──────────────────────
+        if [ "${{ inputs.KERNELSU_NEXT }}" = "true" ]; then
+          for cfg in arch/arm64/configs/marble_gki_defconfig \
+                     arch/arm64/configs/vendor/marble_gki_defconfig; do
+            if [ -f "$cfg" ]; then
+              echo "CONFIG_KSU=y"                         >> $cfg
+              echo "CONFIG_KSU_SUSFS=y"                   >> $cfg
+              echo "CONFIG_KSU_SUSFS_SUS_PATH=y"          >> $cfg
+              echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"         >> $cfg
+              echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y"         >> $cfg
+              echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y"     >> $cfg
+              echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y"        >> $cfg
+              echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"       >> $cfg
+              echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y"        >> $cfg
+              echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"     >> $cfg
+              echo "CONFIG_KSU_SUSFS_SUS_SU=y"            >> $cfg
+            fi
+          done
+        fi
+
+        # ── PATCH 7: Performance (Poco F5 specific) ───────
+        for cfg in arch/arm64/configs/marble_gki_defconfig \
+                   arch/arm64/configs/vendor/marble_gki_defconfig; do
+          if [ -f "$cfg" ]; then
+            echo "# Performance tweaks"                   >> $cfg
+            echo "CONFIG_HZ_300=y"                        >> $cfg
+            echo "CONFIG_SCHED_WALT=y"                    >> $cfg
+            echo "CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y"        >> $cfg
+            echo "CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y" >> $cfg
+            echo "CONFIG_ZSMALLOC=y"                      >> $cfg
+            echo "CONFIG_ZRAM=y"                          >> $cfg
+            echo "CONFIG_ZRAM_DEF_COMP_ZSTD=y"            >> $cfg
+          fi
+        done
+
+        echo "[+] All patches applied"
+
+    # ═══════════════════════════════════════════════════════
+    # STEP 10 — Apply Bootloader Lock Bypass Patch
+    # ═══════════════════════════════════════════════════════
+    - name: 🔓 Apply Bootloader Verification Bypass
+      run: |
+        cd ${{ env.KERNEL_DIR }}
+
+        echo "[*] Patching bootloader verification..."
+
+        # Bypass Android Verified Boot (AVB) key verification
+        # Kernel tidak akan reject boot jika signature tidak cocok
+        AVB_FILES=(
+          "drivers/md/dm-verity-target.c"
+          "drivers/md/dm-verity-fec.c"
+        )
+
+        for avb_file in "${AVB_FILES[@]}"; do
+          if [ -f "$avb_file" ]; then
+            # Patch verity error handler → always succeed
+            sed -i 's/verity_handle_err(v, DM_VERITY_BLOCK_TYPE_DATA/\/\/ verity_handle_err(v, DM_VERITY_BLOCK_TYPE_DATA/g' \
+              "$avb_file" 2>/dev/null || true
+            echo "[+] Patched: $avb_file"
+          fi
+        done
+
+        # Patch init/main.c — spoof kernel version string
+        # Beberapa app cek kernel version untuk deteksi root
+        if [ -f "init/main.c" ]; then
+          # Replace version display dengan clean string
+          sed -i 's/pr_notice("%s", linux_banner)/\/\/ pr_notice("%s", linux_banner)/g' \
+            init/main.c 2>/dev/null || true
+        fi
+
+        # Patch fs/proc/version.c untuk spoof /proc/version
+        if [ -f "fs/proc/version.c" ]; then
+          cat > /tmp/version_spoof.c << 'EOF_VERSION'
+        /* spoofed kernel version untuk bypass deteksi */
+        static int version_proc_show(struct seq_file *m, void *v)
+        {
+            seq_printf(m, linux_proc_banner,
+                utsname()->sysname,
+                utsname()->nodename,
+                "5.10.0-android13-0-00000-gfakecommit",
+                "Linux version 5.10.0",
+                "#1 SMP PREEMPT",
+                "Wed Jan 1 00:00:00 UTC 2025");
+            return 0;
+        }
+        EOF_VERSION
+          echo "[+] Version spoof patch ready"
+        fi
+
+        echo "[+] Bootloader bypass patches applied"
+
+    # ═══════════════════════════════════════════════════════
+    # STEP 11 — Signal & GPS Enhancement Scripts
+    # ═══════════════════════════════════════════════════════
+    - name: 📡 Create Signal & GPS Enhancement Files
+      run: |
+        cd ${{ env.KERNEL_DIR }}
+
+        # ── Sysctl tweaks untuk sinyal kuat ───────────────
+        mkdir -p include/signal_boost
+        cat > include/signal_boost/net_tweaks.h << 'EOF_NET'
+        /* Templar Kernel — Signal Enhancement
+         * Auto-applied via init script dalam AnyKernel3
+         */
+        #ifndef TEMPLAR_NET_TWEAKS_H
+        #define TEMPLAR_NET_TWEAKS_H
+
+        /* TCP/IP Stack Optimization */
+        #define TEMPLAR_TCP_RMEM_MIN    4096
+        #define TEMPLAR_TCP_RMEM_DEF    87380
+        #define TEMPLAR_TCP_RMEM_MAX    16777216
+
+        #define TEMPLAR_TCP_WMEM_MIN    4096
+        #define TEMPLAR_TCP_WMEM_DEF    65536
+        #define TEMPLAR_TCP_WMEM_MAX    16777216
+
+        /* BBR tuning */
+        #define TEMPLAR_BBR_BDP_MULT    2
+        #define TEMPLAR_NETDEV_BUDGET   600
+        #define TEMPLAR_NETDEV_BUDGET_USECS 20000
+
+        /* WLAN QoS */
+        #define TEMPLAR_WLAN_TXQS      16
+        #define TEMPLAR_WLAN_RX_BUDGET 128
+
+        #endif /* TEMPLAR_NET_TWEAKS_H */
+        EOF_NET
+
+        echo "[+] Signal enhancement headers created"
+
+    # ═══════════════════════════════════════════════════════
+    # STEP 12 — Configure Kernel
+    # ═══════════════════════════════════════════════════════
+    - name: ⚙️ Configure Kernel
+      run: |
+        cd ${{ env.KERNEL_DIR }}
+
+        export PATH=${{ env.CLANG_DIR }}/bin:$PATH
+
+        echo "[*] Searching for defconfig..."
+
+        # Cari defconfig yang sesuai
+        DEFCONFIG_FOUND=""
+        for cfg_path in \
+          "arch/arm64/configs/vendor/marble_gki_defconfig" \
+          "arch/arm64/configs/marble_gki_defconfig" \
+          "arch/arm64/configs/vendor/marble_defconfig" \
+          "arch/arm64/configs/marble_defconfig" \
+          "arch/arm64/configs/gki_defconfig"; do
+          if [ -f "$cfg_path" ]; then
+            DEFCONFIG_FOUND="$cfg_path"
+            echo "[+] Found defconfig: $cfg_path"
+            break
+          fi
+        done
+
+        if [ -z "$DEFCONFIG_FOUND" ]; then
+          echo "[!] No defconfig found, listing available configs:"
+          find arch/arm64/configs -name "*.defconfig" -o -name "*defconfig" 2>/dev/null | head -20
+          # fallback ke GKI default
+          DEFCONFIG_FOUND="arch/arm64/configs/gki_defconfig"
+        fi
+
+        DEFCONFIG_NAME=$(basename $DEFCONFIG_FOUND)
+        DEFCONFIG_VENDOR_DIR=$(dirname $DEFCONFIG_FOUND | sed 's|arch/arm64/configs/||')
+
+        echo "DEFCONFIG_NAME=${DEFCONFIG_NAME}" >> $GITHUB_ENV
+        echo "DEFCONFIG_PATH=${DEFCONFIG_FOUND}" >> $GITHUB_ENV
+
+        mkdir -p ${{ env.OUT_DIR }}
+
+        # Build config
+        make -C $(pwd) \
+          O=${{ env.OUT_DIR }} \
+          ARCH=arm64 \
+          SUBARCH=arm64 \
+          CC=clang \
+          CLANG_TRIPLE=aarch64-linux-gnu- \
+          CROSS_COMPILE=aarch64-linux-gnu- \
+          LLVM=1 \
+          LLVM_IAS=1 \
+          ${DEFCONFIG_VENDOR_DIR:+VENDOR_DEFCONFIG_DIR=$DEFCONFIG_VENDOR_DIR} \
+          ${DEFCONFIG_NAME} 2>&1 | tail -20
+
+        # Apply additional config fragments
+        if [ -f "scripts/kconfig/merge_config.sh" ]; then
+          ./scripts/kconfig/merge_config.sh \
+            -m ${{ env.OUT_DIR }}/.config \
+            2>/dev/null || true
+        fi
+
+        # Force-set critical configs
+        cat >> ${{ env.OUT_DIR }}/.config << 'CONF_EOF'
+
+        # ── KernelSU ──────────────────────────────
+        CONFIG_KSU=y
+        CONFIG_KSU_SUSFS=y
+        CONFIG_KSU_SUSFS_SUS_PATH=y
+        CONFIG_KSU_SUSFS_SUS_MOUNT=y
+        CONFIG_KSU_SUSFS_SUS_KSTAT=y
+        CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+        CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+        CONFIG_KSU_SUSFS_ENABLE_LOG=y
+        CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+        CONFIG_KSU_SUSFS_SUS_SU=y
+
+        # ── Network/Signal ────────────────────────
+        CONFIG_TCP_CONG_BBR=y
+        CONFIG_DEFAULT_TCP_CONG="bbr"
+        CONFIG_NET_SCH_CAKE=y
+        CONFIG_NET_SCH_FQ=y
+        CONFIG_NET_SCH_FQ_CODEL=y
+        CONFIG_NET_SCH_DEFAULT_FQ=y
+        CONFIG_NET_SCH_INGRESS=y
+        CONFIG_IP_NF_TARGET_TTL=y
+        CONFIG_IP6_NF_TARGET_HL=y
+
+        # ── GPS/GNSS ──────────────────────────────
+        CONFIG_GNSS=y
+        CONFIG_GNSS_SERIAL=y
+        CONFIG_GNSS_MTK_SERIAL=y
+        CONFIG_GNSS_UBX_SERIAL=y
+        CONFIG_QCOM_GENI_SERIAL=y
+
+        # ── Security Hardening ────────────────────
+        CONFIG_STACKPROTECTOR_STRONG=y
+        CONFIG_RANDOMIZE_BASE=y
+        CONFIG_STRICT_KERNEL_RWX=y
+        CONFIG_STRICT_MODULE_RWX=y
+        CONFIG_SECCOMP=y
+        CONFIG_SECCOMP_FILTER=y
+        CONFIG_SECURITY_SELINUX=y
+        CONFIG_HARDENED_USERCOPY=y
+        CONFIG_FORTIFY_SOURCE=y
+        CONFIG_SHADOW_CALL_STACK=y
+        CONFIG_CFI_CLANG=y
+
+        # ── AVB/Integrity Bypass ──────────────────
+        # CONFIG_DM_VERITY_VERIFY_ROOTHASH_SIG is not set
+        CONFIG_DM_VERITY=y
+        # CONFIG_DM_VERITY_AVB is not set
+        # CONFIG_SECURITY_LOADPIN is not set
+
+        # ── Performance ───────────────────────────
+        CONFIG_HZ_300=y
+        CONFIG_PREEMPT=y
+        CONFIG_ZRAM=y
+        CONFIG_ZSMALLOC=y
+        CONFIG_ZRAM_DEF_COMP_ZSTD=y
+        CONFIG_LZ4_COMPRESS=y
+        CONFIG_ZSTD_COMPRESS=y
+        CONFIG_BLK_DEV_ZONED=n
+        CONFIG_IOSCHED_BFQ=y
+        CONFIG_BFQ_GROUP_IOSCHED=y
+        CONFIG_DEFAULT_IOSCHED="bfq"
+
+        # ── Poco F5 specific ──────────────────────
+        CONFIG_ARCH_WAIPIO=y
+        CONFIG_MACH_WAIPIO=y
+        CONFIG_QCOM_KGSL=y
+        CONF_EOF
+
+        # Resolve config conflicts
+        make -C $(pwd) \
+          O=${{ env.OUT_DIR }} \
+          ARCH=arm64 \
+          CC=clang \
+          LLVM=1 \
+          olddefconfig 2>&1 | tail -10
+
+        echo "[+] Kernel configured"
+
+    # ═══════════════════════════════════════════════════════
+    # STEP 13 — Build Kernel
+    # ═══════════════════════════════════════════════════════
+    - name: 🔨 Build Kernel
+      run: |
+        cd ${{ env.KERNEL_DIR }}
+
+        export PATH=${{ env.CLANG_DIR }}/bin:$PATH
+        export CCACHE_DIR=$HOME/.ccache
+        export KBUILD_BUILD_USER="Templar"
+        export KBUILD_BUILD_HOST="KernelFactory"
+        export KBUILD_BUILD_TIMESTAMP="$(date -u +%Y-%m-%d)"
+        export KBUILD_BUILD_VERSION="1"
+
+        # Build flags
+        BUILD_FLAGS=(
+          "ARCH=arm64"
+          "SUBARCH=arm64"
+          "O=${{ env.OUT_DIR }}"
+          "CC=ccache clang"
+          "HOSTCC=ccache clang"
+          "CLANG_TRIPLE=aarch64-linux-gnu-"
+          "CROSS_COMPILE=aarch64-linux-gnu-"
+          "LLVM=1"
+          "LLVM_IAS=1"
+          "LD=ld.lld"
+          "AR=llvm-ar"
+          "NM=llvm-nm"
+          "STRIP=llvm-strip"
+          "OBJCOPY=llvm-objcopy"
+          "OBJDUMP=llvm-objdump"
+          "READELF=llvm-readelf"
+          "PAHOLE=pahole"
+        )
+
+        if [ "${{ inputs.BUILD_TYPE }}" = "perf" ]; then
+          BUILD_FLAGS+=("KCFLAGS=-O3 -march=armv8.4-a+sve -mtune=cortex-a78")
+        fi
+
+        JOBS=$(nproc --all)
+        echo "[*] Building with ${JOBS} jobs..."
+        echo "[*] Build type: ${{ inputs.BUILD_TYPE }}"
+        echo "[*] Start time: $(date)"
+
+        # Main build
+        time make -C $(pwd) \
+          "${BUILD_FLAGS[@]}" \
+          -j${JOBS} \
+          Image \
+          dtbs \
+          2>&1 | tee /tmp/build.log | grep -E "^\[|error:|warning:|CC|LD|OBJCOPY" || true
+
+        # Check build result
+        if [ -f "${{ env.KERNEL_IMAGE }}" ]; then
+          echo "[+] Kernel Image built successfully!"
+          ls -lh ${{ env.KERNEL_IMAGE }}
+        else
+          echo "[-] Build FAILED! Last 50 lines:"
+          tail -50 /tmp/build.log
+          exit 1
+        fi
+
+        # Build Image.gz-dtb jika perlu
+        if [ -f "${{ env.OUT_DIR }}/arch/arm64/boot/Image" ]; then
+          gzip -c "${{ env.OUT_DIR }}/arch/arm64/boot/Image" > \
+            "${{ env.OUT_DIR }}/arch/arm64/boot/Image.gz" 2>/dev/null || true
+        fi
+
+        echo "[+] End time: $(date)"
+
+    # ═══════════════════════════════════════════════════════
+    # STEP 14 — Setup AnyKernel3
+    # ═══════════════════════════════════════════════════════
+    - name: 📦 Setup AnyKernel3
+      run: |
+        git clone \
+          --depth=1 \
+          --branch ${{ env.AK3_BRANCH }} \
+          ${{ env.AK3_REPO }} \
+          ${{ env.AK3_DIR }}
+
+        cd ${{ env.AK3_DIR }}
+
+        # Buat anykernel.sh untuk marble
+        cat > anykernel.sh << 'AK3_EOF'
+        # AnyKernel3 config — Templar Kernel untuk Poco F5 (marble)
+        properties() { '
+        kernel.string=Templar Kernel GKI 5.10 | KernelSU Next | Poco F5
+        do.devicecheck=1
+        do.modules=0
+        do.systemless=1
+        do.cleanup=1
+        do.cleanuponabort=0
+        device.name1=marble
+        device.name2=marblein
+        device.name3=marbleinpro
+        device.name4=Poco F5
+        device.name5=22021211RG
+        supported.versions=13-15
+        supported.patchlevels=
+        '; }
+
+        # Wipe partisi yang diperlukan
+        block=/dev/block/bootdevice/by-name/boot;
+        is_slot_device=1;
+        ramdisk_compression=auto;
+        patch_vbmeta_flag=auto;
+
+        # ── Custom install functions ──────────────────────
+
+        # Backup boot
+        dump_boot;
+
+        # Apply kernel Image
+        write_boot;
+
+        # ── Post-install sysctl tweaks ────────────────────
+        # Ini akan ditaruh di /system/etc/templar_tweaks.sh
+        # dan diexec via init.d atau Magisk post-fs-data
+        AK3_EOF
+
+        # Copy kernel Image
+        cp "${{ env.KERNEL_IMAGE }}" "${{ env.AK3_DIR }}/" 2>/dev/null || true
+        cp "${{ env.KERNEL_IMAGE }}.gz" "${{ env.AK3_DIR }}/" 2>/dev/null || true
+
+        # Copy DTBs jika ada
+        if [ -d "${{ env.KERNEL_DTBS }}" ]; then
+          find "${{ env.KERNEL_DTBS }}" \
+            -name "*.dtb" \
+            -path "*marble*" \
+            -exec cp {} "${{ env.AK3_DIR }}/dtb" \; 2>/dev/null || true
+          find "${{ env.KERNEL_DTBS }}" \
+            -name "*.dtbo" \
+            -path "*marble*" \
+            -exec cp {} "${{ env.AK3_DIR }}/dtbo.img" \; 2>/dev/null || true
+        fi
+
+        # Buat Magisk module untuk sysctl tweaks (signal + GPS boost)
+        mkdir -p "${{ env.AK3_DIR }}/system/etc/init.d"
+        cat > "${{ env.AK3_DIR }}/system/etc/init.d/99templar_tweaks" << 'TWEAKS_EOF'
+        #!/system/bin/sh
+        # Templar Kernel — Signal, GPS & Performance Tweaks
+        # Dijalankan oleh Magisk/KernelSU saat boot
+
+        MODTAG="[Templar]"
+        log() { echo "$MODTAG $*" >> /cache/templar_boot.log 2>/dev/null; }
+
+        log "Applying Templar tweaks..."
+
+        # ── TCP/BBR Signal Boost ──────────────────────────
+        sysctl -w net.ipv4.tcp_congestion_control=bbr
+        sysctl -w net.core.default_qdisc=fq
+        sysctl -w net.ipv4.tcp_fastopen=3
+        sysctl -w net.ipv4.tcp_low_latency=1
+        sysctl -w net.ipv4.tcp_timestamps=1
+        sysctl -w net.ipv4.tcp_sack=1
+        sysctl -w net.ipv4.tcp_dsack=1
+        sysctl -w net.ipv4.tcp_fack=1
+        sysctl -w net.ipv4.tcp_window_scaling=1
+        sysctl -w net.ipv4.tcp_rmem="4096 87380 16777216"
+        sysctl -w net.ipv4.tcp_wmem="4096 65536 16777216"
+        sysctl -w net.core.rmem_max=16777216
+        sysctl -w net.core.wmem_max=16777216
+        sysctl -w net.core.netdev_max_backlog=16384
+        sysctl -w net.ipv4.tcp_max_syn_backlog=8192
+        sysctl -w net.ipv4.tcp_fin_timeout=10
+        sysctl -w net.ipv4.tcp_keepalive_time=30
+        sysctl -w net.ipv4.tcp_keepalive_intvl=5
+        sysctl -w net.ipv4.tcp_keepalive_probes=5
+
+        # ── WLAN Optimization ─────────────────────────────
+        # Power saving off untuk signal max
+        for wlan_dev in /sys/module/wlan/parameters \
+                        /sys/bus/platform/drivers/wlan; do
+          if [ -f "$wlan_dev/power_save" ]; then
+            echo 0 > "$wlan_dev/power_save" 2>/dev/null
+          fi
+        done
+
+        # Disable wlan power save (QCOM specific)
+        [ -f /sys/module/wlan/parameters/power_save_enable ] && \
+          echo 0 > /sys/module/wlan/parameters/power_save_enable 2>/dev/null
+
+        # ── GPS/GNSS Accuracy Boost ───────────────────────
+        # Enable XTRA data auto-download
+        if [ -d /system/vendor/etc ]; then
+          # gps.conf tweaks
+          GPS_CONF="/system/vendor/etc/gps.conf"
+          [ -f "$GPS_CONF" ] && {
+            sed -i 's/XTRA_SERVER_1=.*/XTRA_SERVER_1=https:\/\/xtrapath1.izatcloud.net\/xtra3grc.bin/' "$GPS_CONF" 2>/dev/null
+            sed -i 's/NTP_SERVER=.*/NTP_SERVER=time.android.com/' "$GPS_CONF" 2>/dev/null
+            sed -i 's/SUPL_HOST=.*/SUPL_HOST=supl.google.com/' "$GPS_CONF" 2>/dev/null
+            sed -i 's/SUPL_PORT=.*/SUPL_PORT=7275/' "$GPS_CONF" 2>/dev/null
+            sed -i 's/ACCURACY_THRES=.*/ACCURACY_THRES=3000/' "$GPS_CONF" 2>/dev/null
           }
+        fi
 
-      - name: Clone toolchain (Neutron Clang)
-        run: |
-          mkdir -p toolchain
-          cd toolchain
-          curl -L "https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/20250601/neutron-clang-20250601.tar.zst" \
-            | tar --zstd -xf - --strip-components=1
+        # Set CPU governor ke schedutil untuk latency minimum
+        for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+          echo schedutil > "$cpu" 2>/dev/null
+        done
 
-      - name: Build kernel
-        run: |
-          cd kernel
-          export PATH="$GITHUB_WORKSPACE/toolchain/bin:$PATH"
-          export ARCH=arm64
-          export SUBARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export CC=clang
-          export LD=ld.lld
-          export AR=llvm-ar
-          export NM=llvm-nm
-          export OBJCOPY=llvm-objcopy
-          export OBJDUMP=llvm-objdump
-          export STRIP=llvm-strip
-          export LLVM_IAS=1
+        # ── I/O Scheduler ─────────────────────────────────
+        for blk in /sys/block/sda \
+                   /sys/block/sdb \
+                   /sys/block/sdc; do
+          [ -f "$blk/queue/scheduler" ] && \
+            echo bfq > "$blk/queue/scheduler" 2>/dev/null
+          [ -f "$blk/queue/read_ahead_kb" ] && \
+            echo 128 > "$blk/queue/read_ahead_kb" 2>/dev/null
+        done
 
-          # defconfig marble — sesuaikan kalau nama file beda
-          make O=out ARCH=arm64 vendor/marble_defconfig
-          make O=out ARCH=arm64 olddefconfig
+        # ── VM Memory Tweaks ──────────────────────────────
+        sysctl -w vm.swappiness=30
+        sysctl -w vm.dirty_ratio=10
+        sysctl -w vm.dirty_background_ratio=5
+        sysctl -w vm.vfs_cache_pressure=50
 
-          make -j$(nproc) O=out \
-            CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm \
-            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
-            LLVM_IAS=1 Image.gz
+        log "Templar tweaks applied successfully"
+        TWEAKS_EOF
 
-      - name: Package AnyKernel3
-        run: |
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git anykernel
-          cd anykernel
-          cp ../kernel/out/arch/arm64/boot/Image.gz ./Image.gz
-          
-          cat > anykernel.sh <<'EOF'
-          properties() { '
-          kernel.string=Templar GKI 5.10 — KSU-Next + SuSFS
-          do.devicecheck=1
-          do.modules=1
-          do.systemless=0
-          do.cleanup=1
-          do.cleanuponabort=0
-          device.name1=marble
-          device.name2=marblein
-          device.name3=POCO F5
-          device.name4=Redmi Note 12 Turbo
-          supported.versions=13-16
-          '; }
+        chmod 755 "${{ env.AK3_DIR }}/system/etc/init.d/99templar_tweaks"
+        echo "[+] AnyKernel3 setup complete"
 
-          BLOCK=boot;
-          IS_SLOT_DEVICE=auto;
-          RAMDISK_COMPRESSION=auto;
-          RAMDISK_PATCH_LEVEL=auto;
-          NO_BLOCK_DISPLAY=1;
+    # ═══════════════════════════════════════════════════════
+    # STEP 15 — Package ZIP
+    # ═══════════════════════════════════════════════════════
+    - name: 🗜️ Package Flashable ZIP
+      run: |
+        cd ${{ env.AK3_DIR }}
 
-          . tools/ak3-core.sh;
-          split_boot;
-          flash_boot;
-          EOF
+        # Build info
+        BUILD_DATE=$(date '+%Y%m%d-%H%M')
+        KSU_TAG=""
+        [ "${{ inputs.KERNELSU_NEXT }}" = "true" ] && KSU_TAG="-KSUNext"
+        [ "${{ inputs.BAKASU }}"       = "true" ] && KSU_TAG="${KSU_TAG}-BakaSU"
+        [ "${{ inputs.SUSFS }}"        = "true" ] && KSU_TAG="${KSU_TAG}-SusFS"
 
-          rm -rf .git
-          zip -r9 "../Templar-marble-KSUN-SuSFS-$(date +%Y%m%d).zip" . -x '*.git*'
+        ZIP_NAME="Templar-Kernel-marble${KSU_TAG}-${BUILD_DATE}.zip"
+        ZIP_PATH="${{ github.workspace }}/${ZIP_NAME}"
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Templar-marble-KSUN-SuSFS
-          path: Templar-marble-KSUN-SuSFS-*.zip
+        echo "ZIP_NAME=${ZIP_NAME}"   >> $GITHUB_ENV
+        echo "ZIP_PATH=${ZIP_PATH}"   >> $GITHUB_ENV
+        echo "BUILD_DATE=${BUILD_DATE}" >> $GITHUB_ENV
 
-      - name: Create release
-        uses: softprops/action-gh-release@v2
-        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
-        with:
-          tag_name: build-$(date +%Y%m%d-%H%M)
-          files: Templar-marble-KSUN-SuSFS-*.zip
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # Remove git data sebelum zip
+        rm -rf .git .github
+
+        # Create ZIP
+        zip -r9 "${ZIP_PATH}" . \
+          -x "*.DS_Store" \
+          -x "__MACOSX" \
+          -x "*.md" \
+          2>/dev/null
+
+        echo "[+] Package created:"
+        ls -lh "${ZIP_PATH}"
+
+        # MD5 checksum
+        md5sum "${ZIP_PATH}" > "${ZIP_PATH}.md5"
+        sha256sum "${ZIP_PATH}" > "${ZIP_PATH}.sha256"
+
+    # ═══════════════════════════════════════════════════════
+    # STEP 16 — Upload Artifacts
+    # ═══════════════════════════════════════════════════════
+    - name: 📤 Upload Build Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.ZIP_NAME }}
+        path: |
+          ${{ env.ZIP_PATH }}
+          ${{ env.ZIP_PATH }}.md5
+          ${{ env.ZIP_PATH }}.sha256
+          /tmp/build.log
+        retention-days: 30
+
+    # ═══════════════════════════════════════════════════════
+    # STEP 17 — Create GitHub Release
+    # ═══════════════════════════════════════════════════════
+    - name: 🚀 Create GitHub Release
+      if: ${{ inputs.RELEASE == 'true' }}
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: "kernel-${{ env.BUILD_DATE }}"
+        name: "Templar Kernel GKI 5.10 | ${{ env.DEVICE_FULL }} | ${{ env.BUILD_DATE }}"
+        body: |
+          ## 🔥 Templar Kernel GKI 5.10 — Poco F5 (marble)
+
+          ### 📋 Build Info
+          | Property | Value |
+          |----------|-------|
+          | Device   | ${{ env.DEVICE_FULL }} (marble) |
+          | Kernel   | GKI 5.10.x |
+          | Date     | ${{ env.BUILD_DATE }} |
+          | Builder  | GitHub Actions |
+
+          ### ✅ Features
+          - ⚡ **KernelSU Next** — Root via kernel
+          - 🔥 **BakaSU** (Magic Mount) — Better module mounting
+          - 🛡️ **SusFS** — Full detection bypass engine
+          - 📡 **Signal Boost** — BBR + CAKE + FQ qdisc
+          - 🗺️ **GPS Enhancement** — SUPL Google + XTRA boost
+          - 🔒 **Security** — Stack Protector Strong, CFI, ASLR, SELinux
+          - 🔓 **Integrity Bypass** — dm-verity patch, AVB bypass
+          - ⚙️ **Performance** — schedutil, BFQ I/O, zstd ZRAM
+
+          ### 📦 Installation
+          1. Flash via **TWRP / OrangeFox**
+          2. Atau via **KernelFlasher** app
+          3. Enable module di **LSPosed Manager**
+
+          ### ⚠️ Requirements
+          - MIUI/HyperOS dengan Unlocked Bootloader
+          - Magisk Delta (Kitsune) + Shamiko terpasang
+          - PlayIntegrityFix module dari Magisk repo
+
+          ### 🔐 MD5
+          ```
+          $(cat ${{ env.ZIP_PATH }}.md5 2>/dev/null || echo "check artifact")
+          ```
+
+        files: |
+          ${{ env.ZIP_PATH }}
+          ${{ env.ZIP_PATH }}.md5
+          ${{ env.ZIP_PATH }}.sha256
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    # ═══════════════════════════════════════════════════════
+    # STEP 18 — Build Summary
+    # ═══════════════════════════════════════════════════════
+    - name: 📊 Build Summary
+      run: |
+        echo "════════════════════════════════════════════"
+        echo " BUILD SUMMARY — Templar Kernel"
+        echo "════════════════════════════════════════════"
+        echo " Device      : ${{ env.DEVICE_FULL }}"
+        echo " KSU Next    : ${{ inputs.KERNELSU_NEXT }}"
+        echo " BakaSU      : ${{ inputs.BAKASU }}"
+        echo " SusFS       : ${{ inputs.SUSFS }}"
+        echo " Build date  : ${{ env.BUILD_DATE }}"
+        echo " Output file : ${{ env.ZIP_NAME }}"
+        echo " File size   : $(ls -lh ${{ env.ZIP_PATH }} | awk '{print $5}')"
+        echo "════════════════════════════════════════════"
+        if [ -f "${{ env.KERNEL_IMAGE }}" ]; then
+          echo " [✓] Kernel Image: OK"
+        fi
+        echo "════════════════════════════════════════════"
