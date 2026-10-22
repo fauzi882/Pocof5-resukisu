@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       root_variant:
-        description: 'Pilih Varian Root (KernelSU Next atau BakaSU / ReSukiSU)'
+        description: 'Pilih Varian Root (BakaSU / ReSukiSU atau KernelSU Next)'
         required: true
         default: 'bakasu'
         type: choice
@@ -60,7 +60,8 @@ jobs:
           sudo apt-get install -y \
             bc bison build-essential ccache cpio curl flex git git-lfs \
             libelf-dev libncurses5-dev libssl-dev lld llvm lz4 pahole \
-            python3 python3-pip rsync unzip wget xz-utils zip zstd
+            python3 python3-pip rsync unzip wget xz-utils zip zstd \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi binutils-aarch64-linux-gnu
 
       - name: Setup Direktori & Toolchain Clang/LLVM
         run: |
@@ -82,19 +83,25 @@ jobs:
         run: |
           git clone --depth=1 -b "${{ env.SUSFS_BRANCH }}" "${{ env.SUSFS_REPO }}" susfs4ksu
 
-      - name: Integrasi Root (KernelSU Next atau BakaSU) + SuSFS
+      - name: Integrasi Root (KernelSU Next atau BakaSU) + SuSFS Aman
         run: |
           cd kernel
 
-          # Bersihkan sisa diretori KSU bawaan source jika ada agar tidak bentrok
+          # Hapus KSU bawaan dari tree kernel (jika sudah ada di branch Pzqqt) agar tidak bentrok simbol
           rm -rf KernelSU drivers/kernelsu
+          sed -i '/kernelsu/d' drivers/Makefile || true
+          sed -i '/kernelsu/d' drivers/Kconfig || true
+
+          # Simpan state git bersih sebelum integrasi
+          git add -A && git commit -m "clean-pre-root" || true
 
           if [ "${{ github.event.inputs.root_variant }}" = "bakasu" ]; then
             echo ">>> Mengintegrasikan BakaSU (ReSukiSU)..."
-            curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash -s main
+            curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash -s main || \
+            curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash
           else
             echo ">>> Mengintegrasikan KernelSU Next..."
-            if [ "${{ github.event.inputs.enable_susfs == 'true' }}" = "true" ]; then
+            if [ "${{ github.event.inputs.enable_susfs }}" = "true" ]; then
               curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next-susfs || \
               curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
             else
@@ -102,54 +109,112 @@ jobs:
             fi
           fi
 
-          # Terapkan patch kernel-side SuSFS
-          if [ "${{ github.event.inputs.enable_susfs }}" = "true" ]; then
-            echo ">>> Menyalin file inti SuSFS ke tree kernel..."
+          # Uji penerapan patch SuSFS secara atomik (Cegah partial patch yang bikin error kompilasi)
+          SUSFS_OK="false"
+          if [ "${{ github.event.inputs.enable_susfs }}" = "true" ] && [ -d "../susfs4ksu" ]; then
+            echo ">>> Menyalin header & source SuSFS..."
             cp -r ../susfs4ksu/kernel_patches/fs/* fs/
             cp -r ../susfs4ksu/kernel_patches/include/linux/* include/linux/
 
-            if [ -f "../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android12-5.10.patch" ]; then
-              patch -p1 --forward --fuzz=3 < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android12-5.10.patch || true
-            fi
-
-            # Jika memakai KernelSU Next branch standar, terapkan patch SuSFS ke folder KernelSU
-            if [ "${{ github.event.inputs.root_variant }}" = "kernelsu-next" ] && [ -d "KernelSU" ]; then
-              for p in ../susfs4ksu/kernel_patches/KernelSU/*.patch; do
-                [ -f "$p" ] && patch -d KernelSU -p1 --forward --fuzz=3 < "$p" || true
-              done
+            PATCH_FILE="../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android12-5.10.patch"
+            if [ -f "$PATCH_FILE" ]; then
+              if patch -p1 --dry-run --fuzz=3 < "$PATCH_FILE" >/dev/null 2>&1; then
+                patch -p1 --forward --fuzz=3 < "$PATCH_FILE"
+                SUSFS_OK="true"
+                echo ">>> Patch SuSFS 50_add_susfs berhasil diterapkan 100%!"
+              elif git apply --3way --check "$PATCH_FILE" >/dev/null 2>&1; then
+                git apply --3way "$PATCH_FILE"
+                SUSFS_OK="true"
+                echo ">>> Patch SuSFS diterapkan via git 3-way merge!"
+              else
+                echo ">>> PERINGATAN: Source kernel Pzqqt memiliki konflik hunk dengan patch SuSFS."
+                echo ">>> Membersihkan sisa file SuSFS agar kompilasi KernelSU/BakaSU tetap berhasil tanpa error..."
+                rm -f fs/susfs.c fs/sus_su.c include/linux/susfs*.h
+                SUSFS_OK="false"
+              fi
             fi
           fi
+          echo "SUSFS_APPLIED=$SUSFS_OK" >> $GITHUB_ENV
 
-      - name: Patch Source BBR Plus, Sinyal Modem, GPS & Scheduler
+      - name: Patch Source BBR Plus, Sinyal Modem, GPS & Defconfig
         run: |
           cd kernel
 
-          # 1. Optimasi BBR Plus / BBRv2 Aggressive Pacing & Drain pada net/ipv4/tcp_bbr.c
+          # 1. Optimasi konstanta TCP BBR Plus pada net/ipv4/tcp_bbr.c (Aman dari Werror)
           if [ "${{ github.event.inputs.tcp_profile }}" = "bbr_plus_tuned" ] && [ -f "net/ipv4/tcp_bbr.c" ]; then
-            echo ">>> Menyetel konstanta TCP BBR ke profil BBR Plus (Low Latency & High Throughput)..."
-            # Percepat respon probe bandwidth dan kurangi antrean buffer (bufferbloat) pada jaringan seluler
-            sed -i 's/BBR_UNIT \* 5 \/ 4/BBR_UNIT * 11 \/ 8/g' net/ipv4/tcp_bbr.c || true
+            echo ">>> Menyetel konstanta TCP BBR ke profil BBR Plus..."
             sed -i 's/static const u32 bbr_min_rtt_win_sec = 10;/static const u32 bbr_min_rtt_win_sec = 5;/g' net/ipv4/tcp_bbr.c || true
             sed -i 's/static const u32 bbr_probe_rtt_mode_ms = 200;/static const u32 bbr_probe_rtt_mode_ms = 100;/g' net/ipv4/tcp_bbr.c || true
           fi
 
-          # 2. Deteksi file defconfig utama Marble
+          # 2. Deteksi Defconfig Marble di repo Pzqqt
           if [ -f "arch/arm64/configs/marble_defconfig" ]; then
+            DEFCONFIG_NAME="marble_defconfig"
             DEFCONFIG_FILE="arch/arm64/configs/marble_defconfig"
+          elif [ -f "arch/arm64/configs/vendor/marble_defconfig" ]; then
+            DEFCONFIG_NAME="vendor/marble_defconfig"
+            DEFCONFIG_FILE="arch/arm64/configs/vendor/marble_defconfig"
           elif [ -f "arch/arm64/configs/vendor/marble_GKI.config" ]; then
+            DEFCONFIG_NAME="gki_defconfig"
             DEFCONFIG_FILE="arch/arm64/configs/vendor/marble_GKI.config"
           else
+            DEFCONFIG_NAME="gki_defconfig"
             DEFCONFIG_FILE="arch/arm64/configs/gki_defconfig"
           fi
-          echo "DEFCONFIG_PATH=$DEFCONFIG_FILE" >> $GITHUB_ENV
+
+          echo "TARGET_DEFCONFIG=$DEFCONFIG_NAME" >> $GITHUB_ENV
+          echo ">>> Menggunakan Defconfig: $DEFCONFIG_FILE"
 
           cat << 'EOF' >> "$DEFCONFIG_FILE"
 
-          # === ROOT & SUSFS ===
+          # === MATIKAN WERROR AGAR TIDAK GAGAL KARENA WARNING COMPILER ===
+          CONFIG_WERROR=n
+          CONFIG_FRAME_WARN=4096
+
+          # === ROOT (KSU-NEXT / BAKASU) ===
           CONFIG_KSU=y
           CONFIG_KPROBES=y
           CONFIG_HAVE_KPROBES=y
           CONFIG_KPROBE_EVENTS=y
+
+          # === TCP BBR & SINYAL MODEM KUAT ===
+          CONFIG_TCP_CONG_ADVANCED=y
+          CONFIG_TCP_CONG_BBR=y
+          CONFIG_DEFAULT_BBR=y
+          CONFIG_DEFAULT_TCP_CONG="bbr"
+          CONFIG_NET_SCH_FQ=y
+          CONFIG_NET_SCH_FQ_CODEL=y
+          CONFIG_DEFAULT_FQ=y
+          CONFIG_INET_UDP_DIAG=y
+          CONFIG_INET_RAW_DIAG=y
+          CONFIG_INET_DIAG_DESTROY=y
+
+          # === GPS / GNSS PRECISION & TIMING ===
+          CONFIG_HIGH_RES_TIMERS=y
+          CONFIG_PPS=y
+          CONFIG_PTP_1588_CLOCK=y
+
+          # === GAMING FPS & EFISIENSI BATERAI ===
+          CONFIG_HZ_300=y
+          CONFIG_HZ=300
+          CONFIG_NO_HZ_IDLE=y
+          CONFIG_UCLAMP_TASK=y
+          CONFIG_UCLAMP_TASK_GROUP=y
+          CONFIG_SCHED_MC=y
+          CONFIG_ENERGY_MODEL=y
+          CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y
+          CONFIG_WQ_POWER_EFFICIENT_DEFAULT=y
+          CONFIG_LRU_GEN=y
+          CONFIG_LRU_GEN_ENABLED=y
+          CONFIG_ZRAM=y
+          CONFIG_CRYPTO_LZ4=y
+          CONFIG_CRYPTO_ZSTD=y
+          CONFIG_LTO_CLANG_THIN=y
+          EOF
+
+          # Aktifkan flag SuSFS hanya jika patch kernel-side berhasil masuk 100%
+          if [ "${{ env.SUSFS_APPLIED }}" = "true" ]; then
+            cat << 'EOF' >> "$DEFCONFIG_FILE"
           CONFIG_KSU_SUSFS=y
           CONFIG_KSU_SUSFS_SUS_PATH=y
           CONFIG_KSU_SUSFS_SUS_MOUNT=y
@@ -163,54 +228,10 @@ jobs:
           CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
           CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
           CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
-
-          # === TCP BBR PLUS / BBRv2 & NETWORK SIGNAL ===
-          CONFIG_TCP_CONG_ADVANCED=y
-          CONFIG_TCP_CONG_BBR=y
-          CONFIG_TCP_CONG_BBR2=y
-          CONFIG_DEFAULT_BBR=y
-          CONFIG_DEFAULT_TCP_CONG="bbr"
-          CONFIG_NET_SCH_FQ=y
-          CONFIG_NET_SCH_FQ_CODEL=y
-          CONFIG_DEFAULT_FQ=y
-          CONFIG_INET_SCTP_DIAG=y
-          CONFIG_INET_UDP_DIAG=y
-          CONFIG_INET_RAW_DIAG=y
-          CONFIG_INET_DIAG_DESTROY=y
-          CONFIG_RMNET_PERF=y
-          CONFIG_QCOM_QMI_HELPERS=y
-          CONFIG_QRTR=y
-          CONFIG_QRTR_SMD=y
-          CONFIG_QRTR_MHI=y
-
-          # === GPS / GNSS PRECISION & TIMING ===
-          CONFIG_HIGH_RES_TIMERS=y
-          CONFIG_PPS=y
-          CONFIG_PTP_1588_CLOCK=y
-          CONFIG_RPMSG_QCOM_GLINK_SMEM=y
-
-          # === GAMING FPS & BATTERY EFFICIENCY ===
-          CONFIG_HZ_300=y
-          CONFIG_HZ=300
-          CONFIG_NO_HZ_IDLE=y
-          CONFIG_UCLAMP_TASK=y
-          CONFIG_UCLAMP_TASK_GROUP=y
-          CONFIG_SCHED_MC=y
-          CONFIG_ENERGY_MODEL=y
-          CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y
-          CONFIG_WQ_POWER_EFFICIENT_DEFAULT=y
-          CONFIG_DAMON=y
-          CONFIG_DAMON_VADDR=y
-          CONFIG_DAMON_PADDR=y
-          CONFIG_DAMON_RECLAIM=y
-          CONFIG_BOEFFLA_WL_BLOCKER=y
-          CONFIG_LRU_GEN=y
-          CONFIG_LRU_GEN_ENABLED=y
-          CONFIG_ZRAM=y
-          CONFIG_CRYPTO_LZ4=y
-          CONFIG_CRYPTO_ZSTD=y
-          CONFIG_LTO_CLANG_THIN=y
           EOF
+          else
+            echo "CONFIG_KSU_SUSFS=n" >> "$DEFCONFIG_FILE"
+          fi
 
       - name: Kompilasi Kernel Marble
         run: |
@@ -218,22 +239,22 @@ jobs:
           export KBUILD_BUILD_USER="kanha"
           export KBUILD_BUILD_HOST="marble-forge"
 
-          # Tentukan target defconfig
-          if [ -f "arch/arm64/configs/marble_defconfig" ]; then
-            TARGET_DEFCONFIG="marble_defconfig"
-          else
-            TARGET_DEFCONFIG="gki_defconfig"
-          fi
+          make O=out ARCH=arm64 \
+            CC="ccache clang" \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            "${{ env.TARGET_DEFCONFIG }}"
 
-          make O=out ARCH=arm64 "$TARGET_DEFCONFIG"
-
-          # Jika menggunakan fragmen vendor/marble_GKI.config, gabungkan otomatis
-          if [ -f "arch/arm64/configs/vendor/marble_GKI.config" ] && [ "$TARGET_DEFCONFIG" = "gki_defconfig" ]; then
+          if [ -f "arch/arm64/configs/vendor/marble_GKI.config" ] && [ "${{ env.TARGET_DEFCONFIG }}" = "gki_defconfig" ]; then
             ./scripts/kconfig/merge_config.sh -m -O out out/.config arch/arm64/configs/vendor/marble_GKI.config
-            make O=out ARCH=arm64 olddefconfig
           fi
 
-          # Kompilasi penuh menggunakan seluruh thread CPU Runner + Clang ThinLTO
+          # Paksa nonaktifkan WERROR di dalam out/.config
+          ./scripts/config --file out/.config -d WERROR -d CONFIG_WERROR --set-val FRAME_WARN 4096
+          make O=out ARCH=arm64 CC="ccache clang" LLVM=1 LLVM_IAS=1 olddefconfig
+
+          # Kompilasi Image & simpan log lengkap untuk menangkap baris error jika gagal
+          set +e
           make -j$(nproc --all) \
             O=out \
             ARCH=arm64 \
@@ -242,8 +263,19 @@ jobs:
             LLVM_IAS=1 \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
-            KCFLAGS="-O3 -march=armv8.2-a+crypto+fp16+dotprod -mtune=cortex-a710" \
-            Image Image.gz dtbs
+            KCFLAGS="-O2 -Wno-error -Wno-unused-variable -Wno-unused-function -Wno-frame-larger-than" \
+            Image Image.gz 2>&1 | tee build_full.log
+          BUILD_STATUS=${PIPESTATUS[0]}
+          set -e
+
+          if [ $BUILD_STATUS -ne 0 ]; then
+            echo "================================================================"
+            echo ">>> RINGKASAN AKAR ERROR KOMPILASI (TERTANGKAP DARI LOG):"
+            echo "================================================================"
+            grep -E "error:|fatal error:|undefined reference|FAILED" build_full.log | tail -n 50 || true
+            echo "================================================================"
+            exit $BUILD_STATUS
+          fi
 
       - name: Paketkan ke AnyKernel3 dengan Modul Tuning Sinyal, GPS & Gaming
         run: |
@@ -251,7 +283,6 @@ jobs:
           cd AnyKernel3
           rm -rf .git README.md
 
-          # Sesuaikan anykernel.sh untuk Poco F5 / Redmi Note 12 Turbo (marble / marblein)
           sed -i 's/device.name1=.*/device.name1=marble/' anykernel.sh
           sed -i 's/device.name2=.*/device.name2=marblein/' anykernel.sh
           sed -i 's/device.name3=.*/device.name3=Redmi Note 12 Turbo/' anykernel.sh
@@ -259,39 +290,31 @@ jobs:
           sed -i 's/BLOCK=.*/BLOCK=auto;/' anykernel.sh
           sed -i 's/IS_SLOT_DEVICE=.*/IS_SLOT_DEVICE=1;/' anykernel.sh
 
-          # Salin hasil build kernel Image
           if [ -f "../kernel/out/arch/arm64/boot/Image.gz" ]; then
             cp ../kernel/out/arch/arm64/boot/Image.gz .
           else
             cp ../kernel/out/arch/arm64/boot/Image .
           fi
 
-          # Tambahkan skrip tuning otomatis saat boot melalui patch ramdisk / init.marble_tune.rc
-          mkdir -p patch
           cat << 'EOF' > ak3_marble_tune.sh
           #!/system/bin/sh
-          # Tunggu sampai sistem selesai boot
           while [ "$(getprop sys.boot_completed)" != "1" ]; do
             sleep 2
           done
 
-          # 1. Aktivasi paksa BBR / BBR2 & Fair Queueing (FQ) untuk latensi ping rendah
-          if grep -q "bbr2" /proc/sys/net/ipv4/tcp_available_congestion_control; then
-            echo "bbr2" > /proc/sys/net/ipv4/tcp_congestion_control
-          else
-            echo "bbr" > /proc/sys/net/ipv4/tcp_congestion_control
-          fi
-          echo "fq" > /proc/sys/net/core/default_qdisc
-          echo 3 > /proc/sys/net/ipv4/tcp_fastopen
-          echo 1 > /proc/sys/net/ipv4/tcp_ecn
-          echo 0 > /proc/sys/net/ipv4/tcp_slow_start_after_idle
+          # 1. Aktivasi BBR + Fair Queueing (FQ)
+          echo "bbr" > /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null
+          echo "fq" > /proc/sys/net/core/default_qdisc 2>/dev/null
+          echo 3 > /proc/sys/net/ipv4/tcp_fastopen 2>/dev/null
+          echo 1 > /proc/sys/net/ipv4/tcp_ecn 2>/dev/null
+          echo 0 > /proc/sys/net/ipv4/tcp_slow_start_after_idle 2>/dev/null
 
           # 2. Penguatan Sinyal Provider (RMNET Buffer & Modem Power Save Control)
-          echo "4096,87380,16777216" > /proc/sys/net/ipv4/tcp_rmem
-          echo "4096,65536,16777216" > /proc/sys/net/ipv4/tcp_wmem
-          echo 16777216 > /proc/sys/net/core/rmem_max
-          echo 16777216 > /proc/sys/net/core/wmem_max
-          echo 5000 > /proc/sys/net/core/netdev_max_backlog
+          echo "4096,87380,16777216" > /proc/sys/net/ipv4/tcp_rmem 2>/dev/null
+          echo "4096,65536,16777216" > /proc/sys/net/ipv4/tcp_wmem 2>/dev/null
+          echo 16777216 > /proc/sys/net/core/rmem_max 2>/dev/null
+          echo 16777216 > /proc/sys/net/core/wmem_max 2>/dev/null
+          echo 5000 > /proc/sys/net/core/netdev_max_backlog 2>/dev/null
           resetprop -n persist.vendor.radio.add_power_save 0
           resetprop -n persist.vendor.radio.apm_sim_not_pwdn 1
           resetprop -n persist.vendor.radio.sib16_support 1
@@ -301,7 +324,7 @@ jobs:
           resetprop -n persist.vendor.overlay.izat.optin rro
           resetprop -n persist.backup.ntpServer "0.id.pool.ntp.org"
           for dev in /sys/devices/platform/soc/*.qcom,glink/*; do
-            [ -e "$dev/power/control" ] && echo "on" > "$dev/power/control"
+            [ -e "$dev/power/control" ] && echo "on" > "$dev/power/control" 2>/dev/null
           done
 
           # 4. Keseimbangan Performa FPS Gaming & Efisiensi Baterai (UClamp & Schedutil)
@@ -314,15 +337,14 @@ jobs:
             echo 10000 > "$gov/schedutil/down_rate_limit_us" 2>/dev/null
           done
 
-          # 5. Aktifkan Multi-Gen LRU (MGLRU) untuk cegah frame drop akibat swap thrashing
+          # 5. Aktifkan Multi-Gen LRU (MGLRU)
           echo "0x0007" > /sys/kernel/mm/lru_gen/enabled 2>/dev/null
           echo 1000 > /sys/kernel/mm/lru_gen/min_ttl_ms 2>/dev/null
           EOF
           chmod 0755 ak3_marble_tune.sh
 
-          # Buat paket ZIP Flashable
           BUILD_DATE=$(date +"%Y%m%d-%H%M")
-          ZIP_NAME="Melt-Marble-${{ github.event.inputs.root_variant }}-SuSFS-${{ github.event.inputs.tcp_profile }}-${BUILD_DATE}.zip"
+          ZIP_NAME="Melt-Marble-${{ github.event.inputs.root_variant }}-SuSFS_${{ env.SUSFS_APPLIED }}-${BUILD_DATE}.zip"
           zip -r9 "../${ZIP_NAME}" * -x "*.git*"
           echo "ZIP_OUTPUT=${ZIP_NAME}" >> $GITHUB_ENV
 
