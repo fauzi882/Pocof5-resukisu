@@ -1,4 +1,4 @@
-name: Build Custom Kernel (Marble + KSU Next / BakaSU) — UPGRADED
+name: Build Custom Kernel Marble Poco F5
 
 on:
   workflow_dispatch:
@@ -7,180 +7,145 @@ on:
         description: "URL repo source kernel"
         default: "https://github.com/Pzqqt/android_kernel_xiaomi_marble.git"
       kernel_branch:
-        description: "Branch kernel (kosongin = default branch repo, JANGAN ada spasi)"
+        description: "Branch kernel (kosongkan = default)"
         default: ""
       defconfig:
-        description: "Nama file defconfig"
+        description: "Nama defconfig"
         default: "marble_defconfig"
-      enable_susfs:
-        description: "Aktifin SuSFS? (run pertama matiin dulu buat tes build polos)"
-        type: boolean
-        default: true
-      susfs_branch:
-        description: "Branch susfs4ksu (harus cocok sama versi kernel)"
-        default: "gki-android12-5.10"
-      enable_nethunter_wifi:
-        description: "EKSPERIMENTAL: coba patch monitor mode WiFi (qcacld)"
-        type: boolean
-        default: true
-      enable_tweaks:
-        description: "Tambah semua tweak (governor, BBR, GPS, audio, gaming, baterai, dll)"
-        type: boolean
-        default: true
-      enable_rtl8188eus:
-        description: "Build driver RTL8188EUS (monitor mode + injection)"
-        type: boolean
-        default: true
-      enable_zram:
-        description: "Aktifin ZRAM + LZ4/ZSTD compressor buat gaming/multitask"
-        type: boolean
-        default: true
-      enable_overclock:
-        description: "Aktifin dukungan overclock/undervolt (cpufreq tables + volt control)"
-        type: boolean
-        default: true
-      enable_dolby:
-        description: "Aktifin tweak audio Dolby Atmos (ALSA/ASoC routing tweaks)"
-        type: boolean
-        default: true
-      enable_gplay_bypass:
-        description: "Patch Google Play integrity bypass (props spoofing via build.prop injection)"
-        type: boolean
-        default: true
       root_solution:
-        description: "Root solution yang diintegrasi ke kernel"
+        description: "Root solution"
         type: choice
         options:
           - ksu-next
           - bakasu
         default: ksu-next
       bakasu_branch:
-        description: "Branch BakaSU (dipakai kalau root_solution=bakasu)"
+        description: "Branch BakaSU (kalau root_solution=bakasu)"
         default: "main"
+      enable_susfs:
+        description: "Aktifin SuSFS"
+        type: boolean
+        default: true
+      susfs_branch:
+        description: "Branch susfs4ksu"
+        default: "gki-android12-5.10"
+      enable_nethunter_wifi:
+        description: "Patch monitor mode WiFi (eksperimental)"
+        type: boolean
+        default: true
+      enable_rtl8188eus:
+        description: "Build driver RTL8188EUS"
+        type: boolean
+        default: true
+      enable_tweaks:
+        description: "Aktifin semua tweak (gaming, BBR, GPS, baterai, dll)"
+        type: boolean
+        default: true
+      enable_zram:
+        description: "Aktifin ZRAM LZ4/ZSTD"
+        type: boolean
+        default: true
+      enable_overclock:
+        description: "Aktifin overclock/undervolt sysfs"
+        type: boolean
+        default: true
+      enable_dolby:
+        description: "Aktifin tweak audio Dolby Atmos"
+        type: boolean
+        default: true
+      enable_gplay_bypass:
+        description: "Google Play integrity bypass support"
+        type: boolean
+        default: true
 
 jobs:
-  # ─────────────────────────────────────────────────────────────────────────────
-  # STEP 0 — Resolve versi terbaru KSU Next, BakaSU, dan SuSFS secara otomatis
-  # ─────────────────────────────────────────────────────────────────────────────
+
   resolve-versions:
     runs-on: ubuntu-latest
     outputs:
-      ksu_next_ref: ${{ steps.resolve.outputs.ksu_next_ref }}
-      bakasu_ref:   ${{ steps.resolve.outputs.bakasu_ref }}
-      susfs_ref:    ${{ steps.resolve.outputs.susfs_ref }}
+      ksu_ref: ${{ steps.rv.outputs.ksu_ref }}
+      ksu_repo: ${{ steps.rv.outputs.ksu_repo }}
+      ksu_branch: ${{ steps.rv.outputs.ksu_branch }}
+      bakasu_ref: ${{ steps.rv.outputs.bakasu_ref }}
+      bakasu_branch: ${{ steps.rv.outputs.bakasu_branch }}
+      susfs_ref: ${{ steps.rv.outputs.susfs_ref }}
     steps:
-      - name: Resolve latest refs
-        id: resolve
+      - name: Resolve latest refs otomatis
+        id: rv
         env:
           ROOT_SOLUTION: ${{ inputs.root_solution }}
-          BAKASU_BRANCH: ${{ inputs.bakasu_branch }}
-          SUSFS_BRANCH:  ${{ inputs.susfs_branch }}
+          BAKASU_BRANCH_INPUT: ${{ inputs.bakasu_branch }}
+          SUSFS_BRANCH: ${{ inputs.susfs_branch }}
         run: |
           set -euo pipefail
+          resolve_ref() { git ls-remote --heads "$1" "$2" 2>/dev/null | awk '{print $1}' | head -n1; }
 
-          # ── KSU Next (dev-susfs = branch resmi yang bawa glue SuSFS) ──
-          KSU_NEXT_REF=$(
-            git ls-remote --heads \
-              https://github.com/pershoot/KernelSU-Next.git \
-              dev-susfs \
-            | awk '{print $1}'
-          )
-          # Fallback ke branch "dev" di repo KernelSU-Next resmi kalau pershoot 404
-          if [ -z "$KSU_NEXT_REF" ]; then
-            KSU_NEXT_REF=$(
-              git ls-remote --heads \
-                https://github.com/KernelSU-Next/KernelSU-Next.git dev \
-              | awk '{print $1}'
-            )
-            KSU_NEXT_REPO="KernelSU-Next/KernelSU-Next"
-            KSU_NEXT_BRANCH="dev"
+          echo "==== Resolving KSU Next ===="
+          KSU_REF=$(resolve_ref "https://github.com/pershoot/KernelSU-Next.git" "dev-susfs")
+          if [ -n "$KSU_REF" ]; then
+            KSU_REPO="pershoot/KernelSU-Next"
+            KSU_BRANCH="dev-susfs"
           else
-            KSU_NEXT_REPO="pershoot/KernelSU-Next"
-            KSU_NEXT_BRANCH="dev-susfs"
+            KSU_REF=$(resolve_ref "https://github.com/KernelSU-Next/KernelSU-Next.git" "dev")
+            KSU_REPO="KernelSU-Next/KernelSU-Next"
+            KSU_BRANCH="dev"
           fi
+          [ -n "$KSU_REF" ] || { echo "ERROR: KSU Next tidak bisa di-resolve"; exit 1; }
+          echo "KSU Next: $KSU_REPO@$KSU_BRANCH => $KSU_REF"
 
-          # ── BakaSU ──
-          BAKASU_REF=$(
-            git ls-remote --heads \
-              https://github.com/Baka-SU/BakaSU.git \
-              "$BAKASU_BRANCH" \
-            | awk '{print $1}'
-          )
+          echo "==== Resolving BakaSU ===="
+          BAKASU_REF=$(resolve_ref "https://github.com/Baka-SU/BakaSU.git" "$BAKASU_BRANCH_INPUT")
+          BAKASU_BRANCH_RESOLVED="$BAKASU_BRANCH_INPUT"
           if [ -z "$BAKASU_REF" ]; then
-            # coba semua branch populer BakaSU
             for br in main master next dev; do
-              BAKASU_REF=$(
-                git ls-remote --heads \
-                  https://github.com/Baka-SU/BakaSU.git "$br" \
-                | awk '{print $1}'
-              )
-              [ -n "$BAKASU_REF" ] && { BAKASU_BRANCH="$br"; break; }
+              BAKASU_REF=$(resolve_ref "https://github.com/Baka-SU/BakaSU.git" "$br")
+              if [ -n "$BAKASU_REF" ]; then BAKASU_BRANCH_RESOLVED="$br"; break; fi
             done
           fi
-          if [ -z "$BAKASU_REF" ]; then
-            echo "::error::BakaSU: semua branch dicoba gak ada yang ada ($BAKASU_BRANCH, main, master, next, dev)"
-            exit 1
-          fi
+          [ -n "$BAKASU_REF" ] || { BAKASU_REF="not-resolved"; echo "WARNING: BakaSU tidak ditemukan"; }
+          echo "BakaSU: $BAKASU_BRANCH_RESOLVED => $BAKASU_REF"
 
-          # ── SuSFS ──
-          SUSFS_REF=$(
-            git ls-remote --heads \
-              https://gitlab.com/simonpunk/susfs4ksu.git \
-              "$SUSFS_BRANCH" \
-            | awk '{print $1}'
-          )
-          if [ -z "$SUSFS_REF" ]; then
-            echo "::error::SuSFS branch '$SUSFS_BRANCH' gak ketemu di gitlab.com/simonpunk/susfs4ksu"
-            exit 1
-          fi
+          echo "==== Resolving SuSFS ===="
+          SUSFS_REF=$(resolve_ref "https://gitlab.com/simonpunk/susfs4ksu.git" "$SUSFS_BRANCH")
+          [ -n "$SUSFS_REF" ] || { echo "ERROR: susfs4ksu branch '$SUSFS_BRANCH' tidak ditemukan"; exit 1; }
+          echo "SuSFS: $SUSFS_BRANCH => $SUSFS_REF"
 
-          echo "ksu_next_ref=${KSU_NEXT_REF}" >> "$GITHUB_OUTPUT"
-          echo "bakasu_ref=${BAKASU_REF}"      >> "$GITHUB_OUTPUT"
-          echo "susfs_ref=${SUSFS_REF}"        >> "$GITHUB_OUTPUT"
+          echo "ksu_ref=$KSU_REF" >> "$GITHUB_OUTPUT"
+          echo "ksu_repo=$KSU_REPO" >> "$GITHUB_OUTPUT"
+          echo "ksu_branch=$KSU_BRANCH" >> "$GITHUB_OUTPUT"
+          echo "bakasu_ref=$BAKASU_REF" >> "$GITHUB_OUTPUT"
+          echo "bakasu_branch=$BAKASU_BRANCH_RESOLVED" >> "$GITHUB_OUTPUT"
+          echo "susfs_ref=$SUSFS_REF" >> "$GITHUB_OUTPUT"
 
-          echo "=== Versi terbaru yang akan dipakai ==="
-          echo "  KSU Next  : ${KSU_NEXT_REPO}@${KSU_NEXT_BRANCH} → ${KSU_NEXT_REF}"
-          echo "  BakaSU    : Baka-SU/BakaSU@${BAKASU_BRANCH} → ${BAKASU_REF}"
-          echo "  SuSFS     : simonpunk/susfs4ksu@${SUSFS_BRANCH} → ${SUSFS_REF}"
-
-          # Simpan detail ke env supaya bisa dibaca step berikutnya kalau perlu
-          echo "KSU_NEXT_REPO=${KSU_NEXT_REPO}"     >> "$GITHUB_ENV"
-          echo "KSU_NEXT_BRANCH=${KSU_NEXT_BRANCH}" >> "$GITHUB_ENV"
-          echo "BAKASU_BRANCH_RESOLVED=${BAKASU_BRANCH}" >> "$GITHUB_ENV"
-
-  # ─────────────────────────────────────────────────────────────────────────────
-  # STEP UTAMA — Build kernel
-  # ─────────────────────────────────────────────────────────────────────────────
   build-kernel:
     runs-on: ubuntu-latest
     needs: resolve-versions
     timeout-minutes: 180
-    defaults:
-      run:
-        shell: bash
     env:
-      ZIP_NAME: Marble-${{ inputs.root_solution }}-${{ github.run_number }}.zip
-      KSU_NEXT_REF: ${{ needs.resolve-versions.outputs.ksu_next_ref }}
-      BAKASU_REF:   ${{ needs.resolve-versions.outputs.bakasu_ref }}
-      SUSFS_REF:    ${{ needs.resolve-versions.outputs.susfs_ref }}
+      ZIP_NAME: "Marble-${{ inputs.root_solution }}-${{ github.run_number }}.zip"
+      KSU_REF: ${{ needs.resolve-versions.outputs.ksu_ref }}
+      KSU_REPO: ${{ needs.resolve-versions.outputs.ksu_repo }}
+      KSU_BRANCH: ${{ needs.resolve-versions.outputs.ksu_branch }}
+      BAKASU_REF: ${{ needs.resolve-versions.outputs.bakasu_ref }}
+      BAKASU_BRANCH: ${{ needs.resolve-versions.outputs.bakasu_branch }}
+      SUSFS_REF: ${{ needs.resolve-versions.outputs.susfs_ref }}
 
     steps:
-      # ─── Setup toolchain ───────────────────────────────────────────────────
+
       - name: Setup environment
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            git bc bison flex make zip curl cpio rsync xz-utils lz4 lzop \
-            libssl-dev libelf-dev libncurses-dev device-tree-compiler python3 \
-            clang lld llvm gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
-            adb fastboot wget unzip
+            git bc bison flex make zip curl cpio rsync \
+            xz-utils lz4 lzop libssl-dev libelf-dev \
+            libncurses-dev device-tree-compiler python3 \
+            clang lld llvm \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
           clang --version | head -n1
-          echo "NPROC=$(nproc)" >> "$GITHUB_ENV"
 
-      # ─── Clone kernel ──────────────────────────────────────────────────────
       - name: Clone kernel source
         env:
-          KERNEL_REPO:   ${{ inputs.kernel_repo }}
+          KERNEL_REPO: ${{ inputs.kernel_repo }}
           KERNEL_BRANCH: ${{ inputs.kernel_branch }}
         run: |
           if [ -n "$KERNEL_BRANCH" ]; then
@@ -189,78 +154,62 @@ jobs:
             git clone --depth=1 "$KERNEL_REPO" kernel-source
           fi
 
-      # ─── Diagnosa source ───────────────────────────────────────────────────
-      - name: Diagnosa source kernel
+      - name: Diagnosa kernel source
         working-directory: kernel-source
         run: |
           echo "=== Versi kernel ==="
           grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL|EXTRAVERSION) ' Makefile || true
           git log -1 --format='%h %s (%cd)' || true
-          echo "=== Branch yang ada di repo ==="
-          git ls-remote --heads origin | sed 's|.*refs/heads/||' | head -n 30 || true
-          echo "=== SuSFS / KSU udah ada belum? ==="
-          grep -rIl -i susfs --exclude-dir=.git --include='*.c' --include='*.h' --include='Kconfig' --include='Makefile' . | head -n 15 || true
-          ls -d drivers/kernelsu* 2>/dev/null || echo "(gak ada drivers/kernelsu)"
-          echo "=== Lokasi defconfig marble ==="
+          echo "=== Defconfig marble ==="
           find arch/arm64/configs -name '*marble*'
-          echo "=== Driver WiFi (qcacld) ==="
-          find . -maxdepth 4 -type d -iname 'qcacld*' 2>/dev/null | head -n 5 || true
-          echo "=== USB gadget / HID ==="
-          grep -rl 'USB_CONFIGFS_F_HID\|USB_CONFIGFS' drivers/usb/gadget/Kconfig 2>/dev/null || echo "(gak ketemu)"
-          echo "=== Bluetooth Kconfig ==="
-          test -f net/bluetooth/Kconfig && echo "net/bluetooth/Kconfig ada" || echo "(gak ketemu)"
+          echo "=== KSU/SuSFS status ==="
+          ls -d drivers/kernelsu* 2>/dev/null || echo "(belum ada drivers/kernelsu)"
+          grep -rIl -i susfs --exclude-dir=.git \
+            --include='*.c' --include='*.h' \
+            --include='Kconfig' --include='Makefile' . 2>/dev/null | head -n 5 || true
           echo "=== GPS driver ==="
-          find . -maxdepth 4 -type d -iname '*gnss*' -o -iname '*gps*' 2>/dev/null | grep -v '\.git' | head -n 10 || true
-          echo "=== Audio ASoC drivers ==="
-          find . -maxdepth 4 -type d -iname '*qcom*audio*' -o -iname '*sm8450*' 2>/dev/null | grep -v '\.git' | head -n 5 || true
+          find . -maxdepth 4 -type d \( -iname '*gnss*' -o -iname '*gps*' \) \
+            2>/dev/null | grep -v '\.git' | head -n 5 || true
 
-      # ─── Root solution: KSU Next atau BakaSU (versi terbaru otomatis) ──────
-      - name: Integrasi root solution (BakaSU / KSU Next) — versi terbaru
+      - name: Integrasi root solution
         working-directory: kernel-source
         env:
-          ENABLE_SUSFS:  ${{ inputs.enable_susfs }}
           ROOT_SOLUTION: ${{ inputs.root_solution }}
+          ENABLE_SUSFS: ${{ inputs.enable_susfs }}
         run: |
           if [ "$ROOT_SOLUTION" = "bakasu" ]; then
-            SETUP_REPO="Baka-SU/BakaSU"
-            SETUP_REF="${BAKASU_REF}"
-            # setup.sh diambil dari commit hash terbaru agar selalu fresh
-            SETUP_URL="https://raw.githubusercontent.com/${SETUP_REPO}/${SETUP_REF}/kernel/setup.sh"
-          elif [ "$ENABLE_SUSFS" = "true" ]; then
-            # pershoot/KernelSU-Next@dev-susfs = KSU Next + glue SuSFS terintegrasi
-            SETUP_URL="https://raw.githubusercontent.com/pershoot/KernelSU-Next/${KSU_NEXT_REF}/kernel/setup.sh"
-            SETUP_REF="${KSU_NEXT_REF}"
+            SETUP_URL="https://raw.githubusercontent.com/Baka-SU/BakaSU/${BAKASU_REF}/kernel/setup.sh"
+            USE_REF="$BAKASU_REF"
+            echo "=== BakaSU @ $BAKASU_BRANCH ($BAKASU_REF) ==="
           else
-            SETUP_URL="https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/${KSU_NEXT_REF}/kernel/setup.sh"
-            SETUP_REF="${KSU_NEXT_REF}"
+            SETUP_URL="https://raw.githubusercontent.com/${KSU_REPO}/${KSU_REF}/kernel/setup.sh"
+            USE_REF="$KSU_REF"
+            echo "=== KSU Next @ $KSU_BRANCH ($KSU_REF) ==="
           fi
 
-          echo "=== Pakai setup.sh dari ${SETUP_URL} (commit: ${SETUP_REF}) ==="
-          if ! curl -fLsS "$SETUP_URL" -o setup.sh; then
-            echo "::error::setup.sh gak bisa diambil dari ${SETUP_URL}"
-            echo "Coba setup_alt (langsung git add-file):"
-            # Fallback: clone penuh terus copy manual
-            git clone --depth=1 "https://github.com/pershoot/KernelSU-Next.git" /tmp/ksu-next-src
-            cp -r /tmp/ksu-next-src/kernel drivers/kernelsu
-            # Tambah entry ke Makefile + Kconfig drivers
-            grep -q 'kernelsu' drivers/Makefile || echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
-            grep -q 'kernelsu' drivers/Kconfig  || sed -i '/^endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
-            echo "=== Fallback clone sukses ==="
-          else
-            bash setup.sh "$SETUP_REF"
+          if curl -fLsS "$SETUP_URL" -o setup.sh; then
+            bash setup.sh "$USE_REF"
             rm -f setup.sh
+          else
+            echo "setup.sh gagal, fallback clone manual..."
+            git clone --depth=1 -b "$KSU_BRANCH" \
+              "https://github.com/${KSU_REPO}.git" /tmp/ksu-src
+            cp -r /tmp/ksu-src/kernel drivers/kernelsu
+            grep -q 'kernelsu' drivers/Makefile || \
+              echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
+            grep -q 'kernelsu' drivers/Kconfig || \
+              sed -i '/^endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+            rm -rf /tmp/ksu-src
           fi
 
           test -e drivers/kernelsu/Kconfig || {
-            echo "::error::${ROOT_SOLUTION} gagal terintegrasi (drivers/kernelsu gak kebentuk)"
+            echo "ERROR: root solution gagal (drivers/kernelsu tidak terbentuk)"
             exit 1
           }
+          echo "=== Integrasi berhasil ==="
           grep -n kernelsu drivers/Makefile drivers/Kconfig
-          echo "=== Config symbols ==="
-          grep -rhoE 'config [A-Z_]+' drivers/kernelsu/Kconfig | sort -u
 
-      # ─── SuSFS (versi terbaru otomatis via SUSFS_REF) ─────────────────────
-      - name: Patch SuSFS ke kernel — versi terbaru
+      - name: Patch SuSFS
         if: ${{ inputs.enable_susfs }}
         working-directory: kernel-source
         env:
@@ -268,494 +217,280 @@ jobs:
         run: |
           git clone --depth=1 -b "$SUSFS_BRANCH" \
             https://gitlab.com/simonpunk/susfs4ksu.git ../susfs4ksu
-
-          # Verifikasi commit yang dipakai = commit terbaru
-          echo "=== SuSFS commit yang dipakai ==="
+          echo "=== SuSFS commit ==="
           git -C ../susfs4ksu log -1 --format='%h %s (%cd)'
-          echo "  (resolve-versions membaca ref: ${SUSFS_REF})"
 
           PATCH=$(ls ../susfs4ksu/kernel_patches/50_add_susfs_in_*.patch | head -n1)
-          echo "Pakai patch: $PATCH"
+          echo "Patch: $PATCH"
 
-          if ! patch -p1 --dry-run --forward < "$PATCH" > /tmp/dryrun.log 2>&1; then
-            echo "=== RINGKASAN file gagal di-patch ==="
-            awk '/^checking file/{f=$3} /out of .* hunks? FAILED/{print f": "$0}' /tmp/dryrun.log
-            echo "=== Tanda source udah ada SuSFS ==="
-            grep -c -i "previously applied" /tmp/dryrun.log || true
-            echo "::error::Patch SuSFS gak cocok. Ganti susfs_branch atau pakai source yang kompatibel."
-            exit 1
+          if ! patch -p1 --dry-run --forward < "$PATCH" > /tmp/dry.log 2>&1; then
+            awk '/^checking file/{f=$3} /out of .* hunks? FAILED/{print f": "$0}' /tmp/dry.log
+            if grep -qi "previously applied" /tmp/dry.log; then
+              echo "NOTICE: SuSFS sudah built-in. Lanjut."
+            else
+              echo "ERROR: Patch SuSFS tidak cocok"
+              exit 1
+            fi
+          else
+            patch -p1 --forward --no-backup-if-mismatch < "$PATCH"
+            find . -name '*.rej' | grep . && exit 1 || true
           fi
-          patch -p1 --forward --no-backup-if-mismatch < "$PATCH"
-          find . -name '*.rej' | grep . && exit 1 || true
 
           SRC=../susfs4ksu/kernel_patches
-          if [ -d "$SRC/fs" ];            then cp -rn "$SRC/fs/."           fs/;           fi
-          if [ -d "$SRC/include/linux" ]; then cp -rn "$SRC/include/linux/." include/linux/; fi
-          test -f include/linux/susfs.h || {
-            echo "::error::susfs.h gak ada setelah patch"
-            exit 1
-          }
+          [ -d "$SRC/fs" ]            && cp -rn "$SRC/fs/."           fs/
+          [ -d "$SRC/include/linux" ] && cp -rn "$SRC/include/linux/." include/linux/
+          test -f include/linux/susfs.h || { echo "ERROR: susfs.h tidak ada"; exit 1; }
+          echo "=== SuSFS berhasil ==="
 
-      # ─── Patch NetHunter WiFi ─────────────────────────────────────────────
-      - name: Patch NetHunter WiFi (monitor mode, eksperimental)
+      - name: Patch NetHunter WiFi monitor mode
         if: ${{ inputs.enable_nethunter_wifi }}
         working-directory: kernel-source
         run: |
           curl -fLsS -o monitor_mode.patch \
             https://github.com/kimocoder/qualcomm_android_monitor_mode/raw/master/files/enable_monitor_mode.patch
-
-          if patch -p1 --dry-run --forward < monitor_mode.patch > /tmp/wifi_dryrun.log 2>&1; then
+          if patch -p1 --dry-run --forward < monitor_mode.patch > /tmp/wifi.log 2>&1; then
             patch -p1 --forward --no-backup-if-mismatch < monitor_mode.patch
-            echo "=== Patch monitor mode BERHASIL ==="
+            echo "=== Monitor mode berhasil ==="
           else
-            if grep -qi "previously applied" /tmp/wifi_dryrun.log; then
-              echo "::notice::Monitor mode kemungkinan SUDAH built-in. Lanjut tanpa patch."
-            else
-              echo "::warning::Patch monitor mode gak cocok. Build lanjut tanpa patch ini."
-            fi
+            grep -qi "previously applied" /tmp/wifi.log && \
+              echo "NOTICE: Monitor mode sudah built-in" || \
+              echo "WARNING: Patch tidak cocok, lanjut tanpa patch"
           fi
           rm -f monitor_mode.patch
 
-      # ─── TWEAK UTAMA: semua fitur gaming, sinyal, GPS, baterai, audio ──────
-      - name: Tambah semua tweak upgrade
+      - name: Tambah configs ke defconfig
         if: ${{ inputs.enable_tweaks }}
         working-directory: kernel-source
         env:
-          DEFCONFIG:         ${{ inputs.defconfig }}
-          ENABLE_ZRAM:       ${{ inputs.enable_zram }}
-          ENABLE_OVERCLOCK:  ${{ inputs.enable_overclock }}
-          ENABLE_DOLBY:      ${{ inputs.enable_dolby }}
+          DEFCONFIG: ${{ inputs.defconfig }}
+          ENABLE_ZRAM: ${{ inputs.enable_zram }}
+          ENABLE_OVERCLOCK: ${{ inputs.enable_overclock }}
+          ENABLE_DOLBY: ${{ inputs.enable_dolby }}
+          ENABLE_GPLAY: ${{ inputs.enable_gplay_bypass }}
         run: |
           DEF_PATH=$(find arch/arm64/configs -name "$DEFCONFIG" | head -n1)
-          test -n "$DEF_PATH" || {
-            echo "::error::defconfig gak ketemu buat tweaks"
-            exit 1
-          }
+          test -n "$DEF_PATH" || { echo "ERROR: defconfig tidak ditemukan"; exit 1; }
+          echo "Menulis configs ke: $DEF_PATH"
 
-          cat >> "$DEF_PATH" << 'TWEAKS_EOF'
+          echo "" >> "$DEF_PATH"
+          echo "# CPU Governor" >> "$DEF_PATH"
+          echo "CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y" >> "$DEF_PATH"
+          echo "CONFIG_CPU_FREQ_GOV_PERFORMANCE=y" >> "$DEF_PATH"
+          echo "CONFIG_CPU_FREQ_GOV_POWERSAVE=y" >> "$DEF_PATH"
+          echo "CONFIG_CPU_FREQ_GOV_USERSPACE=y" >> "$DEF_PATH"
+          echo "CONFIG_CPU_FREQ_GOV_CONSERVATIVE=y" >> "$DEF_PATH"
+          echo "CONFIG_CPU_FREQ_GOV_ONDEMAND=y" >> "$DEF_PATH"
+          echo "CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y" >> "$DEF_PATH"
 
-# ══════════════════════════════════════════════════════════════════════════════
-# TWEAK UPGRADE — Marble Poco F5 Custom Kernel
-# ══════════════════════════════════════════════════════════════════════════════
+          echo "" >> "$DEF_PATH"
+          echo "# Gaming Performance FPS" >> "$DEF_PATH"
+          echo "CONFIG_SCHED_WALT=y" >> "$DEF_PATH"
+          echo "CONFIG_SCHED_WALT_HMP=y" >> "$DEF_PATH"
+          echo "CONFIG_SCHED_BOOST=y" >> "$DEF_PATH"
+          echo "CONFIG_CPU_BOOST=y" >> "$DEF_PATH"
+          echo "CONFIG_ENERGY_MODEL=y" >> "$DEF_PATH"
+          echo "CONFIG_MQ_IOSCHED_KYBER=y" >> "$DEF_PATH"
+          echo "CONFIG_IOSCHED_BFQ=y" >> "$DEF_PATH"
+          echo "CONFIG_MQ_IOSCHED_BFQ=y" >> "$DEF_PATH"
+          echo "CONFIG_MEMCG=y" >> "$DEF_PATH"
+          echo "CONFIG_MEMCG_SWAP=y" >> "$DEF_PATH"
+          echo "CONFIG_THERMAL=y" >> "$DEF_PATH"
+          echo "CONFIG_CPU_THERMAL=y" >> "$DEF_PATH"
 
-# ── CPU GOVERNOR ─────────────────────────────────────────────────────────────
-CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y
-CONFIG_CPU_FREQ_GOV_PERFORMANCE=y
-CONFIG_CPU_FREQ_GOV_POWERSAVE=y
-CONFIG_CPU_FREQ_GOV_USERSPACE=y
-CONFIG_CPU_FREQ_GOV_CONSERVATIVE=y
-CONFIG_CPU_FREQ_GOV_ONDEMAND=y
-# Jadiin schedutil default — paling optimal buat gaming + efisiensi
-CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y
-# Boost oneshot buat respon input cepat (touchscreen → frame)
-CONFIG_CPU_BOOST=y
-CONFIG_CPU_BOOST_SCHED=y
+          echo "" >> "$DEF_PATH"
+          echo "# TCP BBR BBR2 Jaringan" >> "$DEF_PATH"
+          echo "CONFIG_TCP_CONG_ADVANCED=y" >> "$DEF_PATH"
+          echo "CONFIG_TCP_CONG_BBR=y" >> "$DEF_PATH"
+          echo "CONFIG_TCP_CONG_BBR2=y" >> "$DEF_PATH"
+          echo "CONFIG_TCP_CONG_WESTWOOD=y" >> "$DEF_PATH"
+          echo "CONFIG_TCP_CONG_HTCP=y" >> "$DEF_PATH"
+          echo "CONFIG_TCP_CONG_CUBIC=y" >> "$DEF_PATH"
+          echo "CONFIG_DEFAULT_BBR=y" >> "$DEF_PATH"
+          echo "CONFIG_NET_SCH_CAKE=y" >> "$DEF_PATH"
+          echo "CONFIG_NET_SCH_FQ=y" >> "$DEF_PATH"
+          echo "CONFIG_NET_SCH_FQ_CODEL=y" >> "$DEF_PATH"
+          echo "CONFIG_TCP_FASTOPEN=y" >> "$DEF_PATH"
+          echo "CONFIG_NET_RX_BUSY_POLL=y" >> "$DEF_PATH"
 
-# ── FPS / GAMING PERFORMANCE ─────────────────────────────────────────────────
-# Frame pacing + input boost agar latensi sentuh ke render minimal
-CONFIG_SCHED_WALT=y
-CONFIG_SCHED_WALT_HMP=y
-CONFIG_SCHED_BOOST=y
-CONFIG_DYNAMIC_STUNE_BOOST=y
-# Tingkatkan responsif GPU Adreno — kurangi idle latency
-CONFIG_DRM_MSM=y
-CONFIG_DRM_MSM_GPU_SUDO=y
-CONFIG_MSM_KGSL=y
-CONFIG_MSM_KGSL_IOMMU=y
-# I/O scheduler latensi rendah → frame drop berkurang saat storage sibuk
-CONFIG_MQ_IOSCHED_KYBER=y
-CONFIG_IOSCHED_BFQ=y
-CONFIG_MQ_IOSCHED_BFQ=y
-CONFIG_IOSCHED_CFQ=y
-# VM tweak: kurangi swappiness default supaya game tetap di RAM
-CONFIG_MEMCG=y
-CONFIG_MEMCG_SWAP=y
-# Thermal throttle lebih agresif hanya ketika perlu (bukan paksa throttle saat gaming)
-CONFIG_THERMAL=y
-CONFIG_CPU_THERMAL=y
-CONFIG_DEVFREQ_THERMAL=y
+          echo "" >> "$DEF_PATH"
+          echo "# Netfilter" >> "$DEF_PATH"
+          echo "CONFIG_NETFILTER_ADVANCED=y" >> "$DEF_PATH"
+          echo "CONFIG_NF_CONNTRACK=y" >> "$DEF_PATH"
+          echo "CONFIG_NETFILTER_NETLINK=y" >> "$DEF_PATH"
+          echo "CONFIG_NETFILTER_NETLINK_QUEUE=y" >> "$DEF_PATH"
+          echo "CONFIG_NETFILTER_XT_TARGET_NFQUEUE=y" >> "$DEF_PATH"
+          echo "CONFIG_NETFILTER_XT_TARGET_HL=y" >> "$DEF_PATH"
+          echo "CONFIG_NETFILTER_XT_MATCH_HL=y" >> "$DEF_PATH"
+          echo "CONFIG_IP_NF_IPTABLES=y" >> "$DEF_PATH"
+          echo "CONFIG_IP_NF_MANGLE=y" >> "$DEF_PATH"
+          echo "CONFIG_IP6_NF_IPTABLES=y" >> "$DEF_PATH"
+          echo "CONFIG_IP6_NF_MANGLE=y" >> "$DEF_PATH"
+          echo "CONFIG_NF_TABLES=y" >> "$DEF_PATH"
 
-# ── ZRAM + KOMPRESI (RAM virtual buat multitask gaming) ──────────────────────
-CONFIG_ZRAM=y
-CONFIG_ZRAM_DEF_COMP_LZ4=y
-CONFIG_ZRAM_DEF_COMP_ZSTD=y
-CONFIG_LZ4_COMPRESS=y
-CONFIG_LZ4HC_COMPRESS=y
-CONFIG_ZSTD_COMPRESS=y
-CONFIG_ZSTD_DECOMPRESS=y
-CONFIG_ZSMALLOC=y
-CONFIG_ZSWAP=y
-CONFIG_ZBUD=y
-CONFIG_Z3FOLD=y
+          echo "" >> "$DEF_PATH"
+          echo "# Sinyal WiFi BT LTE" >> "$DEF_PATH"
+          echo "CONFIG_CFG80211=y" >> "$DEF_PATH"
+          echo "CONFIG_CFG80211_WEXT=y" >> "$DEF_PATH"
+          echo "CONFIG_MAC80211=y" >> "$DEF_PATH"
+          echo "CONFIG_MAC80211_RC_MINSTREL=y" >> "$DEF_PATH"
+          echo "CONFIG_MAC80211_RC_MINSTREL_HT=y" >> "$DEF_PATH"
+          echo "CONFIG_ATH10K=y" >> "$DEF_PATH"
+          echo "CONFIG_ATH10K_PCI=y" >> "$DEF_PATH"
+          echo "CONFIG_ATH10K_AHB=y" >> "$DEF_PATH"
+          echo "CONFIG_BT=y" >> "$DEF_PATH"
+          echo "CONFIG_BT_HCIUART=y" >> "$DEF_PATH"
+          echo "CONFIG_BT_HCIUART_H4=y" >> "$DEF_PATH"
+          echo "CONFIG_BT_HCIUART_QCA=y" >> "$DEF_PATH"
+          echo "CONFIG_BT_HIDP=y" >> "$DEF_PATH"
+          echo "CONFIG_BT_RFCOMM=y" >> "$DEF_PATH"
+          echo "CONFIG_BT_LE=y" >> "$DEF_PATH"
+          echo "CONFIG_RMNET=y" >> "$DEF_PATH"
 
-# ── TCP / JARINGAN — BBR + BBRplus/BBR2 ─────────────────────────────────────
-CONFIG_TCP_CONG_ADVANCED=y
-CONFIG_TCP_CONG_BBR=y
-# BBR2 (Google internal evolution — tersedia di beberapa backport 5.10)
-CONFIG_TCP_CONG_BBR2=y
-# Westwood & HTCP sebagai fallback yang solid
-CONFIG_TCP_CONG_WESTWOOD=y
-CONFIG_TCP_CONG_HTCP=y
-CONFIG_TCP_CONG_CUBIC=y
-CONFIG_DEFAULT_BBR=y
-# CAKE qdisc — pengganti fq_codel, jauh lebih baik buat buffer bloat
-CONFIG_NET_SCH_CAKE=y
-CONFIG_NET_SCH_FQ=y
-CONFIG_NET_SCH_FQ_CODEL=y
-CONFIG_NET_SCH_SFQ=y
-# ECN — kurangi packet loss tanpa drop
-CONFIG_IP_ECN=y
-CONFIG_TCP_FASTOPEN=y
-# Optimasi buffer jaringan
-CONFIG_NET_RX_BUSY_POLL=y
-CONFIG_BQL=y
+          echo "" >> "$DEF_PATH"
+          echo "# GPS GNSS" >> "$DEF_PATH"
+          echo "CONFIG_GNSS=y" >> "$DEF_PATH"
+          echo "CONFIG_GNSS_SERIAL=y" >> "$DEF_PATH"
+          echo "CONFIG_MSM_GPS=y" >> "$DEF_PATH"
+          echo "CONFIG_MSM_SUBSYSTEM_RESTART=y" >> "$DEF_PATH"
+          echo "CONFIG_HIGH_RES_TIMERS=y" >> "$DEF_PATH"
+          echo "CONFIG_HZ_300=y" >> "$DEF_PATH"
+          echo "CONFIG_NO_HZ_FULL=y" >> "$DEF_PATH"
+          echo "CONFIG_IP_MULTICAST=y" >> "$DEF_PATH"
 
-# ── NETFILTER ─────────────────────────────────────────────────────────────────
-CONFIG_NETFILTER_ADVANCED=y
-CONFIG_NF_CONNTRACK=y
-CONFIG_NETFILTER_NETLINK=y
-CONFIG_NETFILTER_NETLINK_QUEUE=y
-CONFIG_NETFILTER_XT_TARGET_NFQUEUE=y
-CONFIG_NETFILTER_XT_TARGET_HL=y
-CONFIG_NETFILTER_XT_MATCH_HL=y
-CONFIG_IP_NF_IPTABLES=y
-CONFIG_IP_NF_MANGLE=y
-CONFIG_IP6_NF_IPTABLES=y
-CONFIG_IP6_NF_MANGLE=y
-CONFIG_NF_TABLES=y
-CONFIG_NFT_INET=y
+          echo "" >> "$DEF_PATH"
+          echo "# Baterai EAS" >> "$DEF_PATH"
+          echo "CONFIG_CPU_IDLE=y" >> "$DEF_PATH"
+          echo "CONFIG_CPU_IDLE_GOV_LADDER=y" >> "$DEF_PATH"
+          echo "CONFIG_CPU_IDLE_GOV_MENU=y" >> "$DEF_PATH"
+          echo "CONFIG_ARM_CPUIDLE=y" >> "$DEF_PATH"
+          echo "CONFIG_PM=y" >> "$DEF_PATH"
+          echo "CONFIG_SUSPEND=y" >> "$DEF_PATH"
+          echo "CONFIG_PM_AUTOSLEEP=y" >> "$DEF_PATH"
+          echo "CONFIG_PM_WAKELOCKS=y" >> "$DEF_PATH"
+          echo "CONFIG_PM_WAKELOCKS_LIMIT=100" >> "$DEF_PATH"
+          echo "CONFIG_WAKELOCK=y" >> "$DEF_PATH"
+          echo "CONFIG_ANDROID_LOW_MEMORY_KILLER=y" >> "$DEF_PATH"
+          echo "CONFIG_ANDROID_SIMPLE_LMK=y" >> "$DEF_PATH"
+          echo "CONFIG_QPNP_SMB5=y" >> "$DEF_PATH"
 
-# ── SINYAL KUAT + STABIL (WiFi / LTE / 5G) ──────────────────────────────────
-# QCA WiFi: pastiin semua mode & band tersedia
-CONFIG_CFG80211=y
-CONFIG_CFG80211_WEXT=y
-CONFIG_MAC80211=y
-CONFIG_MAC80211_HAS_RC=y
-CONFIG_MAC80211_RC_MINSTREL=y
-CONFIG_MAC80211_RC_MINSTREL_HT=y
-CONFIG_MAC80211_RC_MINSTREL_VHT=y
-CONFIG_IWLWIFI_DEBUG=n
-# WoWLAN (bisa terima data saat layar mati tanpa drop)
-CONFIG_PM_SLEEP=y
-CONFIG_WLAN_VENDOR_ATH=y
-# Power management WiFi → batasi idle state supaya latensi koneksi stabil
-CONFIG_ATH_CARDS=y
-CONFIG_ATH10K=y
-CONFIG_ATH10K_PCI=y
-CONFIG_ATH10K_AHB=y
-# Bluetooth: pastiin semua profile tersedia
-CONFIG_BT=y
-CONFIG_BT_HCIUART=y
-CONFIG_BT_HCIUART_H4=y
-CONFIG_BT_HCIUART_BCSP=y
-CONFIG_BT_HCIUART_QCA=y
-CONFIG_BT_HIDP=y
-CONFIG_BT_RFCOMM=y
-CONFIG_BT_BNEP=y
-CONFIG_BT_LE=y
-CONFIG_BT_LEDS=y
-# IMS / RCS / 5G modem: jaga socket agar tetap konek
-CONFIG_RMNET=y
-CONFIG_MSM_IPC_ROUTER=y
+          echo "" >> "$DEF_PATH"
+          echo "# Display Video Codec" >> "$DEF_PATH"
+          echo "CONFIG_DRM=y" >> "$DEF_PATH"
+          echo "CONFIG_DRM_MSM=y" >> "$DEF_PATH"
+          echo "CONFIG_FB=y" >> "$DEF_PATH"
+          echo "CONFIG_VIDEO_V4L2=y" >> "$DEF_PATH"
+          echo "CONFIG_MEDIA_SUPPORT=y" >> "$DEF_PATH"
+          echo "CONFIG_MEDIA_CAMERA_SUPPORT=y" >> "$DEF_PATH"
+          echo "CONFIG_VIDEO_QCOM_VENUS=y" >> "$DEF_PATH"
+          echo "CONFIG_SYNC=y" >> "$DEF_PATH"
+          echo "CONFIG_ION=y" >> "$DEF_PATH"
+          echo "CONFIG_ION_MSM=y" >> "$DEF_PATH"
+          echo "CONFIG_DMA_SHARED_BUFFER=y" >> "$DEF_PATH"
 
-# ── GPS — AKURASI + SINYAL KUAT ──────────────────────────────────────────────
-# GNSS subsystem kernel (pastiin compile penuh)
-CONFIG_GNSS=y
-CONFIG_GNSS_SERIAL=y
-# Qualcomm GNSS driver (Snapdragon 7+ Gen 2 marble)
-CONFIG_MSM_GPS=y
-CONFIG_MSM_QDSP6_SSR=y
-CONFIG_MSM_SUBSYSTEM_RESTART=y
-# Sensor fusion buat assisted GPS
-CONFIG_SENSORS_SSC=y
-CONFIG_MSM_HAL_AOP=y
-# High-resolution timer = GPS timestamp akurat
-CONFIG_HZ_300=y
-CONFIG_HZ=300
-CONFIG_HIGH_RES_TIMERS=y
-CONFIG_NO_HZ_FULL=y
-# Posisi lock lebih cepat via SUPL (pastiin DNS + socket tersedia)
-CONFIG_IP_MULTICAST=y
+          echo "" >> "$DEF_PATH"
+          echo "# USB Gadget HID" >> "$DEF_PATH"
+          echo "CONFIG_USB_CONFIGFS=y" >> "$DEF_PATH"
+          echo "CONFIG_USB_CONFIGFS_F_HID=y" >> "$DEF_PATH"
+          echo "CONFIG_HID=y" >> "$DEF_PATH"
+          echo "CONFIG_USB_GADGET=y" >> "$DEF_PATH"
+          echo "CONFIG_USB_CONFIGFS_RNDIS=y" >> "$DEF_PATH"
+          echo "CONFIG_USB_CONFIGFS_MASS_STORAGE=y" >> "$DEF_PATH"
 
-# ── OVERCLOCK + UNDERVOLT ─────────────────────────────────────────────────────
-# Aktifin cpufreq table override + voltage control
-CONFIG_CPU_FREQ_STAT=y
-CONFIG_CPU_FREQ_TIMES=y
-CONFIG_CPU_FREQ_GOV_ATTR_SET=y
-# Devfreq buat GPU overclock
-CONFIG_PM_DEVFREQ=y
-CONFIG_DEVFREQ_GOV_SIMPLE_ONDEMAND=y
-CONFIG_DEVFREQ_GOV_PERFORMANCE=y
-CONFIG_DEVFREQ_GOV_POWERSAVE=y
-CONFIG_DEVFREQ_GOV_USERSPACE=y
-CONFIG_DEVFREQ_GOV_PASSIVE=y
-# MSM devfreq target (GPU / DDR)
-CONFIG_MSM_DEVFREQ=y
-CONFIG_MSM_DEVFREQ_DEVBW=y
-# Tegra/Qualcomm voltage regulator exposure ke userspace
-CONFIG_REGULATOR=y
-CONFIG_REGULATOR_FIXED_VOLTAGE=y
-CONFIG_REGULATOR_VIRTUAL_CONSUMER=y
-CONFIG_REGULATOR_USERSPACE_CONSUMER=y
-CONFIG_REGULATOR_PM8994=y
-CONFIG_REGULATOR_PM660=y
-# Thermal monitoring tanpa paksa throttle prematur
-CONFIG_QTI_THERMAL=y
-CONFIG_QTI_BCL_PMIC5=y
-CONFIG_CPU_FREQ_LIMIT=y
+          echo "" >> "$DEF_PATH"
+          echo "# Security Hardening" >> "$DEF_PATH"
+          echo "CONFIG_STACKPROTECTOR_STRONG=y" >> "$DEF_PATH"
+          echo "CONFIG_FORTIFY_SOURCE=y" >> "$DEF_PATH"
+          echo "CONFIG_HARDENED_USERCOPY=y" >> "$DEF_PATH"
+          echo "CONFIG_SECURITY_DMESG_RESTRICT=y" >> "$DEF_PATH"
+          echo "CONFIG_RANDOMIZE_BASE=y" >> "$DEF_PATH"
+          echo "CONFIG_SLAB_FREELIST_RANDOM=y" >> "$DEF_PATH"
+          echo "CONFIG_SLAB_FREELIST_HARDENED=y" >> "$DEF_PATH"
 
-# ── KUALITAS GAMBAR & VIDEO ──────────────────────────────────────────────────
-# Display pipeline SDM/SM (Snapdragon Display)
-CONFIG_DRM=y
-CONFIG_DRM_MSM=y
-CONFIG_FB=y
-CONFIG_FB_MSM=y
-# DSI panel — pastiin refresh rate tinggi + color accuracy
-CONFIG_QPNP_HAPTICS=y
-CONFIG_MSM_DSI=y
-CONFIG_MSM_DSI_PLL=y
-# MDSS/MDP5 buat compositing
-CONFIG_FB_MSM_MDSS=y
-CONFIG_FB_MSM_MDSS_MDP3=y
-# HDR support
-CONFIG_DRM_MSM_DSI=y
-# Video4Linux2 (V4L2) buat kamera + codec
-CONFIG_VIDEO_V4L2=y
-CONFIG_VIDEO_V4L2_SUBDEV_API=y
-CONFIG_MEDIA_SUPPORT=y
-CONFIG_MEDIA_CAMERA_SUPPORT=y
-# Venus video codec (hardware encode/decode H.264/H.265/AV1)
-CONFIG_VIDEO_QCOM_VENUS=y
-CONFIG_VIDEO_QCOM_VENUS_CORE=y
-# Sync framework buat buffer compositing
-CONFIG_SYNC=y
-CONFIG_SW_SYNC=y
-CONFIG_ION=y
-CONFIG_ION_MSM=y
-CONFIG_DMA_SHARED_BUFFER=y
-
-# ── KUALITAS AUDIO + DOLBY ATMOS ─────────────────────────────────────────────
-# ALSA SoC — base audio Android
-CONFIG_SND=y
-CONFIG_SND_SOC=y
-CONFIG_SND_SOC_MSM8X16_WCD=y
-CONFIG_SND_SOC_WCD_CPE=y
-# Qualcomm audio codec (Snapdragon high-end)
-CONFIG_SND_SOC_WCD9XXX=y
-CONFIG_SND_SOC_WCD934X=y
-CONFIG_SND_SOC_WCD9380=y
-CONFIG_SND_SOC_WCD9385=y
-# DSP offload buat Dolby Atmos processing tanpa beban CPU
-CONFIG_MSM_QDSP6V2=y
-CONFIG_AUDIO_ADSP=y
-CONFIG_QDSP6V2_RPMSG=y
-CONFIG_SND_SOC_MSM_QDSP6V2_INTF=y
-# Dolby DAP (bisa diaktifkan via DolbyAtmos Magisk module setelah flash)
-CONFIG_SND_SOC_DOLBY=y
-CONFIG_AUDIO_EXT_CLK=y
-# USB Audio Class
-CONFIG_USB_AUDIO=y
-CONFIG_SND_USB_AUDIO=y
-# Bluetooth A2DP HD
-CONFIG_BT_HCIUART_BCM=y
-CONFIG_SND_SOC_BT_SCO=y
-# High-res audio: 24-bit / 192kHz
-CONFIG_SND_PCM_OSS=y
-CONFIG_SND_HRTIMER=y
-
-# ── EFISIENSI BATERAI ─────────────────────────────────────────────────────────
-# EAS (Energy-Aware Scheduling): CPU memilih core efisien saat load rendah
-CONFIG_ENERGY_MODEL=y
-CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y
-# Idle state driver
-CONFIG_CPU_IDLE=y
-CONFIG_CPU_IDLE_GOV_LADDER=y
-CONFIG_CPU_IDLE_GOV_MENU=y
-CONFIG_ARM_CPUIDLE=y
-# Deep sleep: pastiin WFI/WFE bisa masuk tanpa di-block driver
-CONFIG_PM=y
-CONFIG_SUSPEND=y
-CONFIG_PM_AUTOSLEEP=y
-CONFIG_PM_WAKELOCKS=y
-CONFIG_PM_WAKELOCKS_LIMIT=100
-CONFIG_PM_DEBUG=n
-CONFIG_PM_TEST_SUSPEND=n
-# Disable wake source yang gak diperlukan saat layar mati
-CONFIG_WAKELOCK=y
-CONFIG_EARLYSUSPEND=n
-# Regulator sleep
-CONFIG_REGULATOR_STUB=n
-# Charger optimization
-CONFIG_QPNP_SMB5=y
-CONFIG_QPNP_SMB2=y
-CONFIG_SMB1355=y
-# LMK adaptive: bunuh proses background lebih agresif di bawah threshold
-CONFIG_ANDROID_LOW_MEMORY_KILLER=y
-CONFIG_ANDROID_SIMPLE_LMK=y
-
-# ── USB GADGET + HID (HID attack) ────────────────────────────────────────────
-CONFIG_USB_CONFIGFS=y
-CONFIG_USB_CONFIGFS_F_HID=y
-CONFIG_HID=y
-CONFIG_USB_GADGET=y
-CONFIG_USB_CONFIGFS_RNDIS=y
-CONFIG_USB_CONFIGFS_ECM=y
-CONFIG_USB_CONFIGFS_MASS_STORAGE=y
-CONFIG_USB_CONFIGFS_F_FS=y
-
-# ── HARDENING + KEAMANAN ─────────────────────────────────────────────────────
-CONFIG_STACKPROTECTOR_STRONG=y
-CONFIG_FORTIFY_SOURCE=y
-CONFIG_HARDENED_USERCOPY=y
-CONFIG_SECURITY_DMESG_RESTRICT=y
-CONFIG_RANDOMIZE_BASE=y
-CONFIG_SLAB_FREELIST_RANDOM=y
-CONFIG_SLAB_FREELIST_HARDENED=y
-TWEAKS_EOF
-
-          echo "=== Tweak berhasil ditambahkan ke $DEF_PATH ==="
-          wc -l "$DEF_PATH"
-
-      # ─── Patch Overclock/Undervolt (inject cpufreq table modifier) ─────────
-      - name: Patch overclock/undervolt support
-        if: ${{ inputs.enable_overclock }}
-        working-directory: kernel-source
-        run: |
-          # Aktifin sysfs node buat expose voltage table ke userspace
-          # (kompatibel sama EX Kernel Manager / Franco Kernel Manager / Kernel Adiutor)
-          DEF_PATH=$(find arch/arm64/configs -name "${{ inputs.defconfig }}" | head -n1)
-
-          cat >> "$DEF_PATH" << 'OC_EOF'
-
-# ── OVERCLOCK / UNDERVOLT SYSFS NODES ────────────────────────────────────────
-CONFIG_CORESIGHT=y
-CONFIG_MSM_PERFORMANCE=y
-CONFIG_MSM_PERFORMANCE_CPUFREQ=y
-# Expose GPU voltage table
-CONFIG_MSM_KGSL_IOMMU=y
-CONFIG_MSM_KGSL_DRM=y
-# Adreno GPU OC via sysfs /sys/class/kgsl/kgsl-3d0/gpuclk
-CONFIG_ADRENO_IDLER=y
-# cpufreq interactive tunables (buat manual tuning via Kernel Adiutor)
-CONFIG_CPU_FREQ_INTERACTIVE=y
-# MSM LLC performance monitor
-CONFIG_MSM_LLCC_PERFMON=y
-OC_EOF
-
-          echo "=== Patch OC/UV berhasil ==="
-
-      # ─── Google Play Integrity Bypass ──────────────────────────────────────
-      - name: Patch Google Play Integrity & Certification Bypass
-        if: ${{ inputs.enable_gplay_bypass }}
-        working-directory: kernel-source
-        run: |
-          DEF_PATH=$(find arch/arm64/configs -name "${{ inputs.defconfig }}" | head -n1)
-
-          # 1. Matiin CONFIG_SECURITY_SELINUX permissive warnings yang dideteksi Play Integrity
-          # 2. Pastiin CONFIG_BINDER_IPC tersedia (SuSFS + KSU butuh ini juga)
-          # 3. Aktifin CONFIG_AUDIT supaya attest-log bisa di-fake (Tricky Store/PIF kompatibel)
-          cat >> "$DEF_PATH" << 'GPLAY_EOF'
-
-# ── GOOGLE PLAY INTEGRITY BYPASS SUPPORT ─────────────────────────────────────
-# KSU + SuSFS handle spoofing di userspace, kernel hanya perlu properti ini:
-# - Binder IPC (wajib buat attestation flow)
-CONFIG_ANDROID_BINDER_IPC=y
-CONFIG_ANDROID_BINDERFS=y
-# - Audit tersedia (Tricky Store / PlayIntegrityFix butuh audit log bisa dibaca)
-CONFIG_AUDIT=y
-CONFIG_AUDITSYSCALL=y
-# - Matiin DEBUG yang bocorkan fingerprint ke dmesg (dibaca Play Protect)
-CONFIG_SECURITY_DMESG_RESTRICT=y
-# - Pastiin SELinux enforcing tetap hidup (spoofing dilakukan di atas, bukan matiin SELinux)
-CONFIG_SECURITY_SELINUX=y
-CONFIG_SECURITY_SELINUX_BOOTPARAM=n
-CONFIG_SECURITY_SELINUX_DEVELOP=n
-# - Buka akses ke /proc/cmdline masking (biar KSU bisa mask dm-verity=0 dari cmdline)
-CONFIG_PROC_CMDLINE_FILTER=y
-# - Aktifin overlayfs buat Zygisk/MagiskHide mounting
-CONFIG_OVERLAY_FS=y
-CONFIG_OVERLAY_FS_REDIRECT_DIR=y
-CONFIG_OVERLAY_FS_INDEX=y
-CONFIG_OVERLAY_FS_XINO_AUTO=y
-# - UID/GID namespace (dipakai Magisk + Zygisk saat spoof build props)
-CONFIG_USER_NS=y
-CONFIG_PID_NS=y
-CONFIG_UTS_NS=y
-CONFIG_IPC_NS=y
-CONFIG_NET_NS=y
-GPLAY_EOF
-
-          echo "=== Google Play bypass configs berhasil ditambahkan ==="
-
-          # 2. Inject anti-detection marker ke cmdline kernel
-          # Kernel cmdline androidboot.verifiedbootstate=green dibaca Play Integrity.
-          # SuSFS + KernelSU akan mask ini, tapi kita bantu dari sisi kernel juga.
-          BOARD_CMDLINE="arch/arm64/configs/cmdline.txt"
-          if [ -f "$BOARD_CMDLINE" ]; then
-            # Hapus marker yang bisa trigger fail attestation
-            sed -i 's/androidboot\.verifiedbootstate=orange//g' "$BOARD_CMDLINE"
-            sed -i 's/androidboot\.verifiedbootstate=red//g'    "$BOARD_CMDLINE"
-            echo "=== cmdline.txt dibersihkan dari verifiedbootstate orange/red ==="
+          if [ "$ENABLE_ZRAM" = "true" ]; then
+            echo "" >> "$DEF_PATH"
+            echo "# ZRAM" >> "$DEF_PATH"
+            echo "CONFIG_ZRAM=y" >> "$DEF_PATH"
+            echo "CONFIG_ZRAM_DEF_COMP_LZ4=y" >> "$DEF_PATH"
+            echo "CONFIG_ZRAM_DEF_COMP_ZSTD=y" >> "$DEF_PATH"
+            echo "CONFIG_LZ4_COMPRESS=y" >> "$DEF_PATH"
+            echo "CONFIG_LZ4HC_COMPRESS=y" >> "$DEF_PATH"
+            echo "CONFIG_ZSTD_COMPRESS=y" >> "$DEF_PATH"
+            echo "CONFIG_ZSTD_DECOMPRESS=y" >> "$DEF_PATH"
+            echo "CONFIG_ZSMALLOC=y" >> "$DEF_PATH"
+            echo "CONFIG_ZSWAP=y" >> "$DEF_PATH"
+            echo "CONFIG_ZBUD=y" >> "$DEF_PATH"
           fi
 
-          # 3. Cek apakah ada hardcoded cmdline di Makefile arch
-          if grep -rI 'verifiedbootstate=orange' arch/arm64/ 2>/dev/null | head -n5; then
-            echo "::warning::Ada hardcoded verifiedbootstate=orange di arch sources — perlu patch manual di source tersebut"
+          if [ "$ENABLE_OVERCLOCK" = "true" ]; then
+            echo "" >> "$DEF_PATH"
+            echo "# Overclock Undervolt" >> "$DEF_PATH"
+            echo "CONFIG_CPU_FREQ_STAT=y" >> "$DEF_PATH"
+            echo "CONFIG_CPU_FREQ_TIMES=y" >> "$DEF_PATH"
+            echo "CONFIG_PM_DEVFREQ=y" >> "$DEF_PATH"
+            echo "CONFIG_DEVFREQ_GOV_SIMPLE_ONDEMAND=y" >> "$DEF_PATH"
+            echo "CONFIG_DEVFREQ_GOV_PERFORMANCE=y" >> "$DEF_PATH"
+            echo "CONFIG_DEVFREQ_GOV_USERSPACE=y" >> "$DEF_PATH"
+            echo "CONFIG_REGULATOR=y" >> "$DEF_PATH"
+            echo "CONFIG_REGULATOR_USERSPACE_CONSUMER=y" >> "$DEF_PATH"
+            echo "CONFIG_MSM_PERFORMANCE=y" >> "$DEF_PATH"
+            echo "CONFIG_CPU_FREQ_LIMIT=y" >> "$DEF_PATH"
           fi
 
-      # ─── Patch Audio Dolby (tambahan routing) ──────────────────────────────
-      - name: Patch kualitas audio (Dolby Atmos routing)
-        if: ${{ inputs.enable_dolby }}
-        working-directory: kernel-source
-        run: |
-          DEF_PATH=$(find arch/arm64/configs -name "${{ inputs.defconfig }}" | head -n1)
-          cat >> "$DEF_PATH" << 'DOLBY_EOF'
+          if [ "$ENABLE_DOLBY" = "true" ]; then
+            echo "" >> "$DEF_PATH"
+            echo "# Audio Dolby Atmos" >> "$DEF_PATH"
+            echo "CONFIG_SND=y" >> "$DEF_PATH"
+            echo "CONFIG_SND_SOC=y" >> "$DEF_PATH"
+            echo "CONFIG_SND_SOC_WCD9XXX=y" >> "$DEF_PATH"
+            echo "CONFIG_SND_SOC_WCD9380=y" >> "$DEF_PATH"
+            echo "CONFIG_MSM_QDSP6V2=y" >> "$DEF_PATH"
+            echo "CONFIG_AUDIO_ADSP=y" >> "$DEF_PATH"
+            echo "CONFIG_SND_SOC_BOLERO=y" >> "$DEF_PATH"
+            echo "CONFIG_SND_SOC_LPASS_RX_MACRO=y" >> "$DEF_PATH"
+            echo "CONFIG_SND_SOC_LPASS_TX_MACRO=y" >> "$DEF_PATH"
+            echo "CONFIG_SND_SOC_LPASS_WSA_MACRO=y" >> "$DEF_PATH"
+            echo "CONFIG_SND_SOC_LPASS_VA_MACRO=y" >> "$DEF_PATH"
+            echo "CONFIG_SND_SOC_SM8450=y" >> "$DEF_PATH"
+            echo "CONFIG_USB_AUDIO=y" >> "$DEF_PATH"
+            echo "CONFIG_SND_USB_AUDIO=y" >> "$DEF_PATH"
+            echo "CONFIG_SND_HRTIMER=y" >> "$DEF_PATH"
+          fi
 
-# ── DOLBY ATMOS / AUDIO QUALITY EXTRA ────────────────────────────────────────
-# Pastiin 32-bit sample tersedia (buat Hi-Res audio)
-CONFIG_SND_SOC_TOPOLOGY=y
-CONFIG_SND_DYNAMIC_MINORS=y
-CONFIG_SND_MAX_CARDS=32
-# DSP ADSP offload path (Dolby DAP jalan di DSP, bukan CPU)
-CONFIG_MSM_QDSP6_SSR=y
-CONFIG_QDSP6V2=y
-CONFIG_MSM_ADSP_LOADER=y
-# TinyALSA (userspace mixer buat Dolby effect routing)
-CONFIG_SND_CTL_ELEM_FAST_LOOKUP=y
-# APQ8096 / SM8450 codec path buat marble
-CONFIG_SND_SOC_SM8450=y
-CONFIG_SND_SOC_LPASS_RX_MACRO=y
-CONFIG_SND_SOC_LPASS_TX_MACRO=y
-CONFIG_SND_SOC_LPASS_WSA_MACRO=y
-CONFIG_SND_SOC_LPASS_VA_MACRO=y
-# Volume boost path lewat MIC preamp stages
-CONFIG_SND_SOC_BOLERO=y
-DOLBY_EOF
+          if [ "$ENABLE_GPLAY" = "true" ]; then
+            echo "" >> "$DEF_PATH"
+            echo "# Google Play Integrity Bypass" >> "$DEF_PATH"
+            echo "CONFIG_ANDROID_BINDER_IPC=y" >> "$DEF_PATH"
+            echo "CONFIG_ANDROID_BINDERFS=y" >> "$DEF_PATH"
+            echo "CONFIG_AUDIT=y" >> "$DEF_PATH"
+            echo "CONFIG_AUDITSYSCALL=y" >> "$DEF_PATH"
+            echo "CONFIG_OVERLAY_FS=y" >> "$DEF_PATH"
+            echo "CONFIG_OVERLAY_FS_REDIRECT_DIR=y" >> "$DEF_PATH"
+            echo "CONFIG_OVERLAY_FS_INDEX=y" >> "$DEF_PATH"
+            echo "CONFIG_OVERLAY_FS_XINO_AUTO=y" >> "$DEF_PATH"
+            echo "CONFIG_USER_NS=y" >> "$DEF_PATH"
+            echo "CONFIG_PID_NS=y" >> "$DEF_PATH"
+            echo "CONFIG_UTS_NS=y" >> "$DEF_PATH"
+            echo "CONFIG_IPC_NS=y" >> "$DEF_PATH"
+            echo "CONFIG_NET_NS=y" >> "$DEF_PATH"
+          fi
 
-          echo "=== Dolby audio configs berhasil ditambahkan ==="
+          echo "=== Selesai. Baris defconfig: $(wc -l < $DEF_PATH) ==="
 
-      # ─── Siapin defconfig ──────────────────────────────────────────────────
-      - name: Siapin defconfig (KSU + SuSFS symbols)
+      - name: Setup KSU dan SuSFS symbols
         working-directory: kernel-source
         env:
-          DEFCONFIG:    ${{ inputs.defconfig }}
+          DEFCONFIG: ${{ inputs.defconfig }}
           ENABLE_SUSFS: ${{ inputs.enable_susfs }}
         run: |
           DEF_PATH=$(find arch/arm64/configs -name "$DEFCONFIG" | head -n1)
-          if [ -z "$DEF_PATH" ]; then
-            echo "::error::defconfig $DEFCONFIG gak ketemu"
-            find arch/arm64/configs -name '*marble*'
-            exit 1
-          fi
+          test -n "$DEF_PATH" || { echo "ERROR: defconfig tidak ditemukan"; exit 1; }
           echo "DEFCONFIG_REL=${DEF_PATH#arch/arm64/configs/}" >> "$GITHUB_ENV"
 
-          {
-            echo ""
-            echo "CONFIG_KSU=y"
-          } >> "$DEF_PATH"
+          echo "" >> "$DEF_PATH"
+          echo "CONFIG_KSU=y" >> "$DEF_PATH"
 
           if [ "$ENABLE_SUSFS" = "true" ]; then
-            echo "CONFIG_KSU_SUSFS=y"         >> "$DEF_PATH"
+            echo "CONFIG_KSU_SUSFS=y" >> "$DEF_PATH"
             echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> "$DEF_PATH"
             echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> "$DEF_PATH"
             echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> "$DEF_PATH"
@@ -765,87 +500,48 @@ DOLBY_EOF
             echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> "$DEF_PATH"
           fi
 
-      # ─── ZRAM config runtime (via init.d / Magisk module — disertakan ke ZIP) ─
-      - name: Buat script ZRAM runtime
-        if: ${{ inputs.enable_zram }}
+      - name: Buat runtime scripts ZRAM dan BBR
         run: |
-          mkdir -p zram-scripts/system/etc/init.d
-          cat > zram-scripts/system/etc/init.d/00-zram-setup.sh << 'ZRAM_SH'
-#!/system/bin/sh
-# ZRAM Setup — dijalankan saat boot oleh Magisk / init.d runner
-# Alokasikan ZRAM = 50% total RAM, pakai algoritma LZ4 (cepat + ringan)
+          mkdir -p runtime-scripts/system/etc/init.d
 
-ZRAM_DEV=/dev/block/zram0
-MEM_TOTAL_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
-ZRAM_SIZE_KB=$(( MEM_TOTAL_KB / 2 ))
-ZRAM_SIZE_MB=$(( ZRAM_SIZE_KB / 1024 ))
+          printf '%s\n' \
+            '#!/system/bin/sh' \
+            'ZRAM=/dev/block/zram0' \
+            'MEM=$(grep MemTotal /proc/meminfo | awk "{print \$2}")' \
+            'SIZE=$(( MEM / 2 / 1024 ))' \
+            'swapoff $ZRAM 2>/dev/null || true' \
+            'echo 1 > /sys/block/zram0/reset 2>/dev/null || true' \
+            'echo lz4 > /sys/block/zram0/comp_algorithm 2>/dev/null || echo lzo > /sys/block/zram0/comp_algorithm 2>/dev/null || true' \
+            'echo "${SIZE}M" > /sys/block/zram0/disksize' \
+            'mkswap $ZRAM && swapon $ZRAM -p 32767' \
+            'sysctl -w vm.swappiness=10' \
+            'sysctl -w vm.dirty_ratio=20' \
+            'sysctl -w vm.dirty_background_ratio=5' \
+            'sysctl -w vm.vfs_cache_pressure=50' \
+            > runtime-scripts/system/etc/init.d/00-zram.sh
 
-# Reset dulu kalau ZRAM udah aktif
-swapoff "$ZRAM_DEV" 2>/dev/null || true
-echo 1 > /sys/block/zram0/reset 2>/dev/null || true
+          printf '%s\n' \
+            '#!/system/bin/sh' \
+            'AVAIL=$(cat /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null)' \
+            'if echo "$AVAIL" | grep -q bbr2; then sysctl -w net.ipv4.tcp_congestion_control=bbr2' \
+            'elif echo "$AVAIL" | grep -q bbr; then sysctl -w net.ipv4.tcp_congestion_control=bbr' \
+            'fi' \
+            'tc qdisc replace dev rmnet_data0 root cake bandwidth 100mbit 2>/dev/null || true' \
+            'tc qdisc replace dev wlan0 root cake bandwidth 300mbit 2>/dev/null || true' \
+            'sysctl -w net.ipv4.tcp_wmem="4096 87380 33554432"' \
+            'sysctl -w net.ipv4.tcp_rmem="4096 87380 33554432"' \
+            'sysctl -w net.core.wmem_max=33554432' \
+            'sysctl -w net.core.rmem_max=33554432' \
+            'sysctl -w net.ipv4.tcp_ecn=1' \
+            'sysctl -w net.ipv4.tcp_fastopen=3' \
+            'sysctl -w net.ipv4.tcp_mtu_probing=1' \
+            > runtime-scripts/system/etc/init.d/01-bbr.sh
 
-# Set algoritma kompresi
-if [ -f /sys/block/zram0/comp_algorithm ]; then
-  # Coba LZ4 dulu, fallback ke LZO
-  echo lz4 > /sys/block/zram0/comp_algorithm 2>/dev/null || \
-  echo lzo > /sys/block/zram0/comp_algorithm 2>/dev/null || true
-fi
+          chmod +x runtime-scripts/system/etc/init.d/00-zram.sh
+          chmod +x runtime-scripts/system/etc/init.d/01-bbr.sh
+          echo "=== Runtime scripts selesai ==="
+          ls -la runtime-scripts/system/etc/init.d/
 
-# Set ukuran
-echo "${ZRAM_SIZE_MB}M" > /sys/block/zram0/disksize
-
-# Format dan aktifin
-mkswap "$ZRAM_DEV" && swapon "$ZRAM_DEV" -p 32767
-
-# VM tuning buat gaming (swappiness rendah = RAM utama dipakai dulu)
-sysctl -w vm.swappiness=10
-sysctl -w vm.dirty_ratio=20
-sysctl -w vm.dirty_background_ratio=5
-sysctl -w vm.vfs_cache_pressure=50
-
-echo "[ZRAM] Aktif: ${ZRAM_SIZE_MB}MB swap tersedia"
-ZRAM_SH
-          chmod +x zram-scripts/system/etc/init.d/00-zram-setup.sh
-
-      # ─── Script BBR runtime ────────────────────────────────────────────────
-      - name: Buat script BBR runtime
-        if: ${{ inputs.enable_tweaks }}
-        run: |
-          mkdir -p bbr-scripts/system/etc/init.d
-          cat > bbr-scripts/system/etc/init.d/01-bbr-setup.sh << 'BBR_SH'
-#!/system/bin/sh
-# BBR + network tuning — dijalankan saat boot
-
-# Coba BBR2 dulu, fallback ke BBR
-if grep -q bbr2 /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
-  sysctl -w net.ipv4.tcp_congestion_control=bbr2
-elif grep -q bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
-  sysctl -w net.ipv4.tcp_congestion_control=bbr
-fi
-
-# Aktifin CAKE qdisc default (buffer bloat killer terbaik)
-tc qdisc replace dev rmnet_data0 root cake bandwidth 100mbit 2>/dev/null || true
-tc qdisc replace dev wlan0 root cake bandwidth 300mbit 2>/dev/null || true
-
-# TCP buffer size optimal buat throughput tinggi
-sysctl -w net.ipv4.tcp_wmem="4096 87380 33554432"
-sysctl -w net.ipv4.tcp_rmem="4096 87380 33554432"
-sysctl -w net.ipv4.tcp_mem="786432 1048576 26777216"
-sysctl -w net.core.wmem_max=33554432
-sysctl -w net.core.rmem_max=33554432
-
-# Aktifin ECN
-sysctl -w net.ipv4.tcp_ecn=1
-sysctl -w net.ipv4.tcp_fastopen=3
-
-# MTU probe
-sysctl -w net.ipv4.tcp_mtu_probing=1
-
-echo "[BBR] Congestion control: $(cat /proc/sys/net/ipv4/tcp_congestion_control)"
-BBR_SH
-          chmod +x bbr-scripts/system/etc/init.d/01-bbr-setup.sh
-
-      # ─── Compile kernel ────────────────────────────────────────────────────
       - name: Compile kernel
         working-directory: kernel-source
         env:
@@ -863,79 +559,63 @@ BBR_SH
           make "${MAKE_ARGS[@]}" "$DEFCONFIG_REL"
           make "${MAKE_ARGS[@]}" olddefconfig
 
-          echo "=== Cek config KSU ==="
+          echo "=== Cek KSU ==="
           grep -E "^CONFIG_KSU" out/.config || true
           grep -q "^CONFIG_KSU=y" out/.config || {
-            echo "::error::CONFIG_KSU gak aktif di .config"
+            echo "ERROR: CONFIG_KSU tidak aktif"
             exit 1
           }
 
           if [ "$ENABLE_SUSFS" = "true" ]; then
             grep -q "^CONFIG_KSU_SUSFS=y" out/.config || {
-              echo "::error::CONFIG_KSU_SUSFS gak aktif (periksa versi KSU Next & SuSFS)"
+              echo "ERROR: CONFIG_KSU_SUSFS tidak aktif"
               exit 1
             }
           fi
 
-          echo "=== Status tweak upgrade ==="
-          grep -E "^CONFIG_(TCP_CONG_BBR|TCP_CONG_BBR2|ZRAM|ENERGY_MODEL|MSM_GPS|GNSS|SND_SOC_DOLBY|OVERLAY_FS|USER_NS|ANDROID_BINDER_IPC)" out/.config || \
-            echo "(beberapa config mungkin gak ada di kernel ini — cek log compile)"
+          echo "=== Status fitur upgrade ==="
+          grep -E "^CONFIG_(TCP_CONG_BBR2|ZRAM|ENERGY_MODEL|GNSS|OVERLAY_FS|SND_SOC_BOLERO|ANDROID_BINDER_IPC)" \
+            out/.config || echo "(beberapa config mungkin tidak tersedia di kernel ini)"
 
           make -j"$(nproc)" "${MAKE_ARGS[@]}" Image 2>&1 | tee build.log
           make "${MAKE_ARGS[@]}" modules_prepare
 
-      # ─── Build RTL8188EUS ──────────────────────────────────────────────────
       - name: Build driver RTL8188EUS
         if: ${{ inputs.enable_rtl8188eus }}
         run: |
           git clone --depth=1 https://github.com/aircrack-ng/rtl8188eus.git rtl8188eus
           cd rtl8188eus
-
           MLFILE=$(grep -rl '^MODULE_LICENSE' . --include='*.c' | head -n1)
-          if [ -n "$MLFILE" ]; then
-            if ! grep -q 'MODULE_IMPORT_NS' "$MLFILE"; then
-              sed -i '/^MODULE_LICENSE/a MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);' "$MLFILE"
-              echo "MODULE_IMPORT_NS ditambahin ke: $MLFILE"
-            fi
+          if [ -n "$MLFILE" ] && ! grep -q 'MODULE_IMPORT_NS' "$MLFILE"; then
+            sed -i '/^MODULE_LICENSE/a MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);' "$MLFILE"
           fi
-
           KDIR="$GITHUB_WORKSPACE/kernel-source/out"
           if ! make -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 \
-               CROSS_COMPILE=aarch64-linux-gnu- KSRC="$KDIR" \
-               KCFLAGS=-Wno-error > /tmp/rtl8188eus_build.log 2>&1; then
-            echo "=== Build RTL8188EUS GAGAL ==="
-            tail -n 30 /tmp/rtl8188eus_build.log
-            echo "::warning::Driver RTL8188EUS gagal. Kernel utama tetap lanjut."
+               CROSS_COMPILE=aarch64-linux-gnu- \
+               KSRC="$KDIR" KCFLAGS=-Wno-error > /tmp/rtl.log 2>&1; then
+            tail -n 20 /tmp/rtl.log
+            echo "WARNING: RTL8188EUS gagal, kernel tetap lanjut"
             exit 0
           fi
-
           KO=$(find . -name '8188eu.ko' | head -n1)
-          if [ -z "$KO" ]; then
-            echo "::warning::Build sukses tapi 8188eu.ko gak ketemu"
-            exit 0
+          if [ -n "$KO" ]; then
+            mkdir -p "$GITHUB_WORKSPACE/out-extra"
+            cp "$KO" "$GITHUB_WORKSPACE/out-extra/8188eu.ko"
+            echo "=== RTL8188EUS berhasil ==="
           fi
-          mkdir -p "$GITHUB_WORKSPACE/out-extra"
-          cp "$KO" "$GITHUB_WORKSPACE/out-extra/8188eu.ko"
-          echo "=== Driver RTL8188EUS berhasil ==="
-          ls -la "$GITHUB_WORKSPACE/out-extra/8188eu.ko"
-          modinfo "$GITHUB_WORKSPACE/out-extra/8188eu.ko" 2>/dev/null | grep -E 'vermagic|description|import_ns' || true
 
-      # ─── Bungkus AnyKernel3 ────────────────────────────────────────────────
-      - name: Bungkus pakai AnyKernel3
+      - name: Bungkus AnyKernel3
         run: |
           IMG=kernel-source/out/arch/arm64/boot/Image
-          test -f "$IMG" || { echo "::error::Image gak kebentuk"; exit 1; }
+          test -f "$IMG" || { echo "ERROR: Image tidak terbentuk"; exit 1; }
 
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
           cp "$IMG" AnyKernel3/Image
-
-          # Copy init.d scripts (ZRAM + BBR) ke AnyKernel3
-          if [ -d zram-scripts ]; then cp -r zram-scripts/. AnyKernel3/; fi
-          if [ -d bbr-scripts ];  then cp -r bbr-scripts/.  AnyKernel3/; fi
+          cp -r runtime-scripts/. AnyKernel3/
 
           cd AnyKernel3
           sed -i \
-            -e 's|^kernel.string=.*|kernel.string=Marble Upgraded — KSU+SuSFS+BBR2+ZRAM+GPS+Dolby|' \
+            -e 's|^kernel.string=.*|kernel.string=Marble Poco F5 - KSU+SuSFS+BBR2+GPS+Dolby+ZRAM|' \
             -e 's|^do.modules=.*|do.modules=0|' \
             -e 's|^device.name1=.*|device.name1=marble|' \
             -e 's|^device.name2=.*|device.name2=marblein|' \
@@ -945,61 +625,57 @@ BBR_SH
             -e 's|^BLOCK=.*|BLOCK=boot;|' \
             -e 's|^IS_SLOT_DEVICE=.*|IS_SLOT_DEVICE=auto;|' \
             anykernel.sh
-          grep -nE '^(kernel.string|device.name|BLOCK|IS_SLOT_DEVICE)' anykernel.sh
 
-          zip -r9 "../$ZIP_NAME" . -x '.git/*' '.github/*' 'README.md' '*placeholder'
+          zip -r9 "../$ZIP_NAME" . \
+            -x '.git/*' -x '.github/*' \
+            -x 'README.md' -x '*placeholder'
 
-      # ─── Upload artifacts ──────────────────────────────────────────────────
+          cd ..
+          test -f "$ZIP_NAME" || { echo "ERROR: ZIP tidak terbentuk"; exit 1; }
+          echo "=== ZIP selesai: $(du -sh $ZIP_NAME) ==="
+
       - name: Upload kernel ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: CustomKernel-Marble-Upgraded-Siap-Flash
+          name: "Marble-Upgraded-${{ github.run_number }}"
           path: ${{ env.ZIP_NAME }}
 
-      - name: Upload driver RTL8188EUS
+      - name: Upload RTL8188EUS driver
         if: ${{ inputs.enable_rtl8188eus }}
         uses: actions/upload-artifact@v4
         with:
-          name: RTL8188EUS-Module
+          name: "RTL8188EUS-${{ github.run_number }}"
           path: out-extra/8188eu.ko
           if-no-files-found: ignore
 
-      - name: Upload log kalau gagal
+      - name: Upload log jika gagal
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log
+          name: build-log-error
           path: kernel-source/build.log
           if-no-files-found: ignore
 
-      # ─── Summary ───────────────────────────────────────────────────────────
       - name: Build summary
         if: success()
-        env:
-          ROOT_SOLUTION:    ${{ inputs.root_solution }}
-          ENABLE_SUSFS:     ${{ inputs.enable_susfs }}
-          ENABLE_OVERCLOCK: ${{ inputs.enable_overclock }}
-          ENABLE_ZRAM:      ${{ inputs.enable_zram }}
-          ENABLE_DOLBY:     ${{ inputs.enable_dolby }}
-          ENABLE_GPLAY:     ${{ inputs.enable_gplay_bypass }}
         run: |
-          echo "## ✅ Build selesai — Marble Upgraded Kernel" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Build Selesai - Marble Poco F5 Upgraded" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "| Fitur | Status |" >> "$GITHUB_STEP_SUMMARY"
           echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Root solution | **${ROOT_SOLUTION}** (versi otomatis terbaru) |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| SuSFS | ${ENABLE_SUSFS} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| FPS Gaming (WALT + Kyber + GPU tuning) | ✅ |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| BBR / BBR2 + CAKE qdisc | ✅ |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Sinyal WiFi/BT/LTE stabil | ✅ |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| GPS strong (GNSS + High-res timer) | ✅ |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Overclock/Undervolt sysfs | ${ENABLE_OVERCLOCK} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| ZRAM LZ4/ZSTD | ${ENABLE_ZRAM} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Kualitas gambar/video (Venus codec + DRM) | ✅ |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Audio Dolby Atmos routing | ${ENABLE_DOLBY} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Efisiensi baterai (EAS + PM + LMK) | ✅ |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Google Play integrity bypass | ${ENABLE_GPLAY} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Root: ${{ inputs.root_solution }} (auto latest) | OK |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| SuSFS | ${{ inputs.enable_susfs }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| FPS Gaming (WALT + Kyber) | OK |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| TCP BBR / BBR2 + CAKE | OK |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Sinyal WiFi/BT stabil | OK |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| GPS GNSS + HiRes Timer | OK |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Overclock/UV sysfs | ${{ inputs.enable_overclock }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| ZRAM LZ4/ZSTD | ${{ inputs.enable_zram }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Video/Display (Venus+DRM) | OK |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Audio Dolby (ADSP+Bolero) | ${{ inputs.enable_dolby }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Efisiensi Baterai (EAS+LMK) | OK |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Google Play bypass | ${{ inputs.enable_gplay_bypass }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "KSU Next ref: \`${KSU_NEXT_REF}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "SuSFS ref   : \`${SUSFS_REF}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "KSU ref   : $KSU_REF" >> "$GITHUB_STEP_SUMMARY"
+          echo "SuSFS ref : $SUSFS_REF" >> "$GITHUB_STEP_SUMMARY"
           
