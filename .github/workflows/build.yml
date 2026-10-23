@@ -1,357 +1,1200 @@
-name: Build Marble Kernel (KSU-Next / BakaSU + SuSFS)
+name: 🔥 Custom Kernel — Poco F5 (marble) | Auto-Version
 
 on:
   workflow_dispatch:
     inputs:
-      root_variant:
-        description: 'Pilih Varian Root (BakaSU / ReSukiSU atau KernelSU Next)'
-        required: true
-        default: 'bakasu'
-        type: choice
-        options:
-          - bakasu
-          - kernelsu-next
-      enable_susfs:
-        description: 'Integrasikan Patch SuSFS (Root Hiding Level Kernel)'
-        required: true
-        default: true
-        type: boolean
-      tcp_profile:
-        description: 'Profil Algoritma TCP Congestion'
-        required: true
-        default: 'bbr_plus_tuned'
-        type: choice
-        options:
-          - bbr_plus_tuned
-          - bbr_standard
+      kernel_repo:
+        description: "URL repo source kernel"
+        default: "https://github.com/Steambot12/Templar-Kernel-GKI-5.10.git"
       kernel_branch:
-        description: 'Branch Source Kernel Pzqqt'
-        required: true
-        default: 'melt-rebase'
+        description: "Branch kernel (kosong = default branch repo)"
+        default: ""
+      defconfig:
+        description: "Nama defconfig (dicari otomatis di arch/arm64/configs)"
+        default: "marble_defconfig"
+
+      root_solution:
+        description: "Root solution yang diintegrasikan ke kernel"
         type: choice
         options:
-          - melt-rebase
-          - bouquet
+          - ksu-next
+          - bakasu
+        default: ksu-next
+      bakasu_branch:
+        description: "Branch BakaSU (hanya dipakai kalau root_solution=bakasu)"
+        default: "main"
 
-env:
-  KERNEL_REPO: "https://github.com/Pzqqt/android_kernel_xiaomi_marble.git"
-  AK3_REPO: "https://github.com/osm0sis/AnyKernel3.git"
-  SUSFS_REPO: "https://gitlab.com/simonpunk/susfs4ksu.git"
-  SUSFS_BRANCH: "gki-android12-5.10"
-  CLANG_URL: "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r536225.tar.gz"
-  ARCH: "arm64"
-  SUBARCH: "arm64"
+      enable_susfs:
+        description: "Aktifkan SusFS (bypass deteksi root di userspace)"
+        type: boolean
+        default: true
+      susfs_branch:
+        description: "Branch susfs4ksu (harus cocok dengan versi kernel)"
+        default: "gki-android12-5.10"
+
+      tcp_congestion:
+        description: "TCP Congestion Control default"
+        type: choice
+        options:
+          - bbr2
+          - bbr
+          - westwood
+          - htcp
+        default: bbr2
+
+      enable_gaming_tweaks:
+        description: "Aktifkan gaming & FPS optimization (WALT, touch boost, GPU)"
+        type: boolean
+        default: true
+      enable_overclock:
+        description: "Aktifkan CPU/GPU overclock (tambah frekuensi tertinggi)"
+        type: boolean
+        default: false
+      enable_undervolt:
+        description: "Aktifkan CPU undervolt (turunkan voltase, hemat daya)"
+        type: boolean
+        default: false
+      enable_battery_tweaks:
+        description: "Aktifkan battery efficiency tweaks (EAS, cpuidle, suspend)"
+        type: boolean
+        default: true
+      enable_tweaks:
+        description: "Aktifkan general tweaks (governor, USB HID, Bluetooth, security)"
+        type: boolean
+        default: true
+      enable_nethunter_wifi:
+        description: "EKSPERIMENTAL: patch monitor mode WiFi (qcacld)"
+        type: boolean
+        default: true
+      enable_rtl8188eus:
+        description: "Build driver RTL8188EUS (monitor mode + injection)"
+        type: boolean
+        default: true
+      enable_release:
+        description: "Buat GitHub Release otomatis"
+        type: boolean
+        default: false
 
 jobs:
-  build-marble-kernel:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 120
+  # ════════════════════════════════════════════════════════
+  # JOB 1 — Fetch versi terbaru semua komponen
+  # ════════════════════════════════════════════════════════
+  fetch-versions:
+    name: 🔍 Auto-Detect Latest Versions
+    runs-on: ubuntu-latest
+    outputs:
+      ksu_next_ref: ${{ steps.versions.outputs.ksu_next_ref }}
+      ksu_next_ver: ${{ steps.versions.outputs.ksu_next_ver }}
+      bakasu_ref:   ${{ steps.versions.outputs.bakasu_ref }}
+      bakasu_ver:   ${{ steps.versions.outputs.bakasu_ver }}
+      susfs_ref:    ${{ steps.versions.outputs.susfs_ref }}
+      ak3_ref:      ${{ steps.versions.outputs.ak3_ref }}
+      build_date:   ${{ steps.versions.outputs.build_date }}
+      zip_name:     ${{ steps.versions.outputs.zip_name }}
 
     steps:
-      - name: Maksimalkan Ruang Disk Runner
+      - name: 🔍 Fetch latest versions via GitHub API
+        id: versions
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          sudo docker image prune --all --force || true
-          df -h
+          set -euo pipefail
 
-      - name: Install Dependensi Kompilasi
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            bc bison build-essential ccache cpio curl flex git git-lfs \
-            libelf-dev libncurses5-dev libssl-dev lld llvm lz4 pahole \
-            python3 python3-pip rsync unzip wget xz-utils zip zstd \
-            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi binutils-aarch64-linux-gnu
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  AUTO-DETECT LATEST VERSIONS"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-      - name: Setup Direktori & Toolchain Clang/LLVM
-        run: |
-          mkdir -p "$HOME/toolchains/clang"
-          wget -qO clang.tar.gz "${{ env.CLANG_URL }}"
-          tar -xzf clang.tar.gz -C "$HOME/toolchains/clang"
-          rm -f clang.tar.gz
-          echo "$HOME/toolchains/clang/bin" >> $GITHUB_PATH
+          BUILD_DATE=$(date '+%Y%m%d-%H%M')
+          echo "build_date=${BUILD_DATE}" >> $GITHUB_OUTPUT
 
-      - name: Clone Source Kernel Pzqqt (Marble)
-        run: |
-          git clone --depth=1 -b "${{ github.event.inputs.kernel_branch }}" "${{ env.KERNEL_REPO }}" kernel
-          cd kernel
-          git config user.name "kanha-builder"
-          git config user.email "builder@localhost"
-
-      - name: Siapkan Repo SuSFS (gki-android12-5.10)
-        if: ${{ github.event.inputs.enable_susfs == 'true' }}
-        run: |
-          git clone --depth=1 -b "${{ env.SUSFS_BRANCH }}" "${{ env.SUSFS_REPO }}" susfs4ksu
-
-      - name: Integrasi Root (KernelSU Next atau BakaSU) + SuSFS Aman
-        run: |
-          cd kernel
-
-          # Hapus KSU bawaan dari tree kernel (jika sudah ada di branch Pzqqt) agar tidak bentrok simbol
-          rm -rf KernelSU drivers/kernelsu
-          sed -i '/kernelsu/d' drivers/Makefile || true
-          sed -i '/kernelsu/d' drivers/Kconfig || true
-
-          # Simpan state git bersih sebelum integrasi
-          git add -A && git commit -m "clean-pre-root" || true
-
-          if [ "${{ github.event.inputs.root_variant }}" = "bakasu" ]; then
-            echo ">>> Mengintegrasikan BakaSU (ReSukiSU)..."
-            curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash -s main || \
-            curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash
-          else
-            echo ">>> Mengintegrasikan KernelSU Next..."
-            if [ "${{ github.event.inputs.enable_susfs }}" = "true" ]; then
-              curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next-susfs || \
-              curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
-            else
-              curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
+          # Helper: ambil latest release tag dari GitHub API
+          latest_tag() {
+            local repo="$1" fallback="$2" result
+            result=$(curl -fsSL \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/${repo}/releases/latest" \
+              2>/dev/null | grep '"tag_name"' | head -1 | cut -d'"' -f4)
+            if [ -z "$result" ]; then
+              result=$(curl -fsSL \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+                "https://api.github.com/repos/${repo}/tags" \
+                2>/dev/null | grep '"name"' | head -1 | cut -d'"' -f4)
             fi
-          fi
+            echo "${result:-$fallback}"
+          }
 
-          # Uji penerapan patch SuSFS secara atomik (Cegah partial patch yang bikin error kompilasi)
-          SUSFS_OK="false"
-          if [ "${{ github.event.inputs.enable_susfs }}" = "true" ] && [ -d "../susfs4ksu" ]; then
-            echo ">>> Menyalin header & source SuSFS..."
-            cp -r ../susfs4ksu/kernel_patches/fs/* fs/
-            cp -r ../susfs4ksu/kernel_patches/include/linux/* include/linux/
+          # Helper: ambil latest commit dari branch
+          latest_commit() {
+            local repo="$1" branch="$2" len="${3:-8}"
+            curl -fsSL \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/${repo}/commits/${branch}" \
+              2>/dev/null | grep '"sha"' | head -1 | cut -d'"' -f4 | cut -c1-${len}
+          }
 
-            PATCH_FILE="../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android12-5.10.patch"
-            if [ -f "$PATCH_FILE" ]; then
-              if patch -p1 --dry-run --fuzz=3 < "$PATCH_FILE" >/dev/null 2>&1; then
-                patch -p1 --forward --fuzz=3 < "$PATCH_FILE"
-                SUSFS_OK="true"
-                echo ">>> Patch SuSFS 50_add_susfs berhasil diterapkan 100%!"
-              elif git apply --3way --check "$PATCH_FILE" >/dev/null 2>&1; then
-                git apply --3way "$PATCH_FILE"
-                SUSFS_OK="true"
-                echo ">>> Patch SuSFS diterapkan via git 3-way merge!"
-              else
-                echo ">>> PERINGATAN: Source kernel Pzqqt memiliki konflik hunk dengan patch SuSFS."
-                echo ">>> Membersihkan sisa file SuSFS agar kompilasi KernelSU/BakaSU tetap berhasil tanpa error..."
-                rm -f fs/susfs.c fs/sus_su.c include/linux/susfs*.h
-                SUSFS_OK="false"
-              fi
-            fi
-          fi
-          echo "SUSFS_APPLIED=$SUSFS_OK" >> $GITHUB_ENV
-
-      - name: Patch Source BBR Plus, Sinyal Modem, GPS & Defconfig
-        run: |
-          cd kernel
-
-          # 1. Optimasi konstanta TCP BBR Plus pada net/ipv4/tcp_bbr.c (Aman dari Werror)
-          if [ "${{ github.event.inputs.tcp_profile }}" = "bbr_plus_tuned" ] && [ -f "net/ipv4/tcp_bbr.c" ]; then
-            echo ">>> Menyetel konstanta TCP BBR ke profil BBR Plus..."
-            sed -i 's/static const u32 bbr_min_rtt_win_sec = 10;/static const u32 bbr_min_rtt_win_sec = 5;/g' net/ipv4/tcp_bbr.c || true
-            sed -i 's/static const u32 bbr_probe_rtt_mode_ms = 200;/static const u32 bbr_probe_rtt_mode_ms = 100;/g' net/ipv4/tcp_bbr.c || true
-          fi
-
-          # 2. Deteksi Defconfig Marble di repo Pzqqt
-          if [ -f "arch/arm64/configs/marble_defconfig" ]; then
-            DEFCONFIG_NAME="marble_defconfig"
-            DEFCONFIG_FILE="arch/arm64/configs/marble_defconfig"
-          elif [ -f "arch/arm64/configs/vendor/marble_defconfig" ]; then
-            DEFCONFIG_NAME="vendor/marble_defconfig"
-            DEFCONFIG_FILE="arch/arm64/configs/vendor/marble_defconfig"
-          elif [ -f "arch/arm64/configs/vendor/marble_GKI.config" ]; then
-            DEFCONFIG_NAME="gki_defconfig"
-            DEFCONFIG_FILE="arch/arm64/configs/vendor/marble_GKI.config"
+          # ── KernelSU Next ─────────────────────────────
+          echo "[*] Fetching KernelSU Next version..."
+          if [ "${{ inputs.enable_susfs }}" = "true" ]; then
+            KSU_BRANCH="dev-susfs"
+            KSU_REPO="pershoot/KernelSU-Next"
           else
-            DEFCONFIG_NAME="gki_defconfig"
-            DEFCONFIG_FILE="arch/arm64/configs/gki_defconfig"
+            KSU_BRANCH="dev"
+            KSU_REPO="KernelSU-Next/KernelSU-Next"
           fi
-
-          echo "TARGET_DEFCONFIG=$DEFCONFIG_NAME" >> $GITHUB_ENV
-          echo ">>> Menggunakan Defconfig: $DEFCONFIG_FILE"
-
-          cat << 'EOF' >> "$DEFCONFIG_FILE"
-
-          # === MATIKAN WERROR AGAR TIDAK GAGAL KARENA WARNING COMPILER ===
-          CONFIG_WERROR=n
-          CONFIG_FRAME_WARN=4096
-
-          # === ROOT (KSU-NEXT / BAKASU) ===
-          CONFIG_KSU=y
-          CONFIG_KPROBES=y
-          CONFIG_HAVE_KPROBES=y
-          CONFIG_KPROBE_EVENTS=y
-
-          # === TCP BBR & SINYAL MODEM KUAT ===
-          CONFIG_TCP_CONG_ADVANCED=y
-          CONFIG_TCP_CONG_BBR=y
-          CONFIG_DEFAULT_BBR=y
-          CONFIG_DEFAULT_TCP_CONG="bbr"
-          CONFIG_NET_SCH_FQ=y
-          CONFIG_NET_SCH_FQ_CODEL=y
-          CONFIG_DEFAULT_FQ=y
-          CONFIG_INET_UDP_DIAG=y
-          CONFIG_INET_RAW_DIAG=y
-          CONFIG_INET_DIAG_DESTROY=y
-
-          # === GPS / GNSS PRECISION & TIMING ===
-          CONFIG_HIGH_RES_TIMERS=y
-          CONFIG_PPS=y
-          CONFIG_PTP_1588_CLOCK=y
-
-          # === GAMING FPS & EFISIENSI BATERAI ===
-          CONFIG_HZ_300=y
-          CONFIG_HZ=300
-          CONFIG_NO_HZ_IDLE=y
-          CONFIG_UCLAMP_TASK=y
-          CONFIG_UCLAMP_TASK_GROUP=y
-          CONFIG_SCHED_MC=y
-          CONFIG_ENERGY_MODEL=y
-          CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y
-          CONFIG_WQ_POWER_EFFICIENT_DEFAULT=y
-          CONFIG_LRU_GEN=y
-          CONFIG_LRU_GEN_ENABLED=y
-          CONFIG_ZRAM=y
-          CONFIG_CRYPTO_LZ4=y
-          CONFIG_CRYPTO_ZSTD=y
-          CONFIG_LTO_CLANG_THIN=y
-          EOF
-
-          # Aktifkan flag SuSFS hanya jika patch kernel-side berhasil masuk 100%
-          if [ "${{ env.SUSFS_APPLIED }}" = "true" ]; then
-            cat << 'EOF' >> "$DEFCONFIG_FILE"
-          CONFIG_KSU_SUSFS=y
-          CONFIG_KSU_SUSFS_SUS_PATH=y
-          CONFIG_KSU_SUSFS_SUS_MOUNT=y
-          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
-          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
-          CONFIG_KSU_SUSFS_SUS_KSTAT=y
-          CONFIG_KSU_SUSFS_TRY_UMOUNT=y
-          CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y
-          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
-          CONFIG_KSU_SUSFS_ENABLE_LOG=y
-          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
-          CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
-          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
-          EOF
+          KSU_TAG=$(latest_tag "$KSU_REPO" "")
+          KSU_COMMIT=$(latest_commit "$KSU_REPO" "$KSU_BRANCH")
+          if [ -n "$KSU_TAG" ]; then
+            KSU_REF="$KSU_TAG"
+            KSU_VER="$KSU_TAG"
           else
-            echo "CONFIG_KSU_SUSFS=n" >> "$DEFCONFIG_FILE"
+            KSU_REF="$KSU_BRANCH"
+            KSU_VER="${KSU_BRANCH}@${KSU_COMMIT}"
           fi
+          echo "  KSU Next → ref=${KSU_REF} ver=${KSU_VER}"
+          echo "ksu_next_ref=${KSU_REF}" >> $GITHUB_OUTPUT
+          echo "ksu_next_ver=${KSU_VER}" >> $GITHUB_OUTPUT
 
-      - name: Kompilasi Kernel Marble
+          # ── BakaSU ────────────────────────────────────
+          echo "[*] Fetching BakaSU version..."
+          BAKA_BRANCH="${{ inputs.bakasu_branch }}"
+          BAKA_COMMIT=$(latest_commit "Baka-SU/BakaSU" "$BAKA_BRANCH" 8)
+          BAKA_VER="${BAKA_BRANCH}@${BAKA_COMMIT:-unknown}"
+          echo "  BakaSU → ver=${BAKA_VER}"
+          echo "bakasu_ref=${BAKA_BRANCH}" >> $GITHUB_OUTPUT
+          echo "bakasu_ver=${BAKA_VER}"    >> $GITHUB_OUTPUT
+
+          # ── SusFS ─────────────────────────────────────
+          echo "[*] Fetching SusFS version..."
+          SUSFS_BRANCH="${{ inputs.susfs_branch }}"
+          SUSFS_COMMIT=$(latest_commit "simonpunk/susfs4ksu" "$SUSFS_BRANCH" 8)
+          echo "  SusFS → ${SUSFS_BRANCH}@${SUSFS_COMMIT:-unknown}"
+          echo "susfs_ref=${SUSFS_BRANCH}" >> $GITHUB_OUTPUT
+
+          # ── AnyKernel3 ────────────────────────────────
+          AK3_COMMIT=$(latest_commit "osm0sis/AnyKernel3" "master" 8)
+          echo "  AnyKernel3 → @${AK3_COMMIT}"
+          echo "ak3_ref=master" >> $GITHUB_OUTPUT
+
+          # ── ZIP name ──────────────────────────────────
+          ROOT_LABEL="${{ inputs.root_solution }}"
+          TCP_LABEL="${{ inputs.tcp_congestion }}"
+          SUFFIX=""
+          [ "${{ inputs.enable_gaming_tweaks }}" = "true" ] && SUFFIX="${SUFFIX}-Gaming"
+          [ "${{ inputs.enable_overclock }}"     = "true" ] && SUFFIX="${SUFFIX}-OC"
+          [ "${{ inputs.enable_undervolt }}"     = "true" ] && SUFFIX="${SUFFIX}-UV"
+          ZIP_NAME="Marble-${ROOT_LABEL}-${TCP_LABEL}${SUFFIX}-${BUILD_DATE}.zip"
+          echo "zip_name=${ZIP_NAME}" >> $GITHUB_OUTPUT
+
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  KSU Next : ${KSU_VER}"
+          echo "  BakaSU   : ${BAKA_VER}"
+          echo "  ZIP      : ${ZIP_NAME}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+  # ════════════════════════════════════════════════════════
+  # JOB 2 — Build Kernel
+  # ════════════════════════════════════════════════════════
+  build-kernel:
+    name: 🔨 Build Kernel
+    runs-on: ubuntu-latest
+    needs: fetch-versions
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      ZIP_NAME:     ${{ needs.fetch-versions.outputs.zip_name }}
+      BUILD_DATE:   ${{ needs.fetch-versions.outputs.build_date }}
+      KSU_NEXT_REF: ${{ needs.fetch-versions.outputs.ksu_next_ref }}
+      KSU_NEXT_VER: ${{ needs.fetch-versions.outputs.ksu_next_ver }}
+      BAKASU_REF:   ${{ needs.fetch-versions.outputs.bakasu_ref }}
+      AK3_REF:      ${{ needs.fetch-versions.outputs.ak3_ref }}
+      SUSFS_REF:    ${{ needs.fetch-versions.outputs.susfs_ref }}
+
+    steps:
+
+      - name: 📋 Build Info
         run: |
-          cd kernel
-          export KBUILD_BUILD_USER="kanha"
-          export KBUILD_BUILD_HOST="marble-forge"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  TEMPLAR KERNEL — Poco F5 (marble)"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  Root     : ${{ inputs.root_solution }}"
+          echo "  KSU Next : ${{ env.KSU_NEXT_VER }}"
+          echo "  TCP      : ${{ inputs.tcp_congestion }}"
+          echo "  SusFS    : ${{ inputs.enable_susfs }}"
+          echo "  Gaming   : ${{ inputs.enable_gaming_tweaks }}"
+          echo "  OC       : ${{ inputs.enable_overclock }}"
+          echo "  UV       : ${{ inputs.enable_undervolt }}"
+          echo "  Battery  : ${{ inputs.enable_battery_tweaks }}"
+          echo "  ZIP      : ${{ env.ZIP_NAME }}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-          make O=out ARCH=arm64 \
-            CC="ccache clang" \
-            LLVM=1 \
-            LLVM_IAS=1 \
-            "${{ env.TARGET_DEFCONFIG }}"
-
-          if [ -f "arch/arm64/configs/vendor/marble_GKI.config" ] && [ "${{ env.TARGET_DEFCONFIG }}" = "gki_defconfig" ]; then
-            ./scripts/kconfig/merge_config.sh -m -O out out/.config arch/arm64/configs/vendor/marble_GKI.config
-          fi
-
-          # Paksa nonaktifkan WERROR di dalam out/.config
-          ./scripts/config --file out/.config -d WERROR -d CONFIG_WERROR --set-val FRAME_WARN 4096
-          make O=out ARCH=arm64 CC="ccache clang" LLVM=1 LLVM_IAS=1 olddefconfig
-
-          # Kompilasi Image & simpan log lengkap untuk menangkap baris error jika gagal
-          set +e
-          make -j$(nproc --all) \
-            O=out \
-            ARCH=arm64 \
-            CC="ccache clang" \
-            LLVM=1 \
-            LLVM_IAS=1 \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
-            KCFLAGS="-O2 -Wno-error -Wno-unused-variable -Wno-unused-function -Wno-frame-larger-than" \
-            Image Image.gz 2>&1 | tee build_full.log
-          BUILD_STATUS=${PIPESTATUS[0]}
-          set -e
-
-          if [ $BUILD_STATUS -ne 0 ]; then
-            echo "================================================================"
-            echo ">>> RINGKASAN AKAR ERROR KOMPILASI (TERTANGKAP DARI LOG):"
-            echo "================================================================"
-            grep -E "error:|fatal error:|undefined reference|FAILED" build_full.log | tail -n 50 || true
-            echo "================================================================"
-            exit $BUILD_STATUS
-          fi
-
-      - name: Paketkan ke AnyKernel3 dengan Modul Tuning Sinyal, GPS & Gaming
+      - name: 📦 Install dependencies
         run: |
-          git clone --depth=1 "${{ env.AK3_REPO }}" AnyKernel3
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            git bc bison flex make zip curl cpio rsync xz-utils lz4 lzop \
+            libssl-dev libelf-dev libncurses-dev device-tree-compiler python3 \
+            clang lld llvm gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+            pahole dwarves ccache zstd patch patchutils python3-pip kmod
+          clang --version | head -n1
+          echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
+          ccache --max-size=4G
+
+      - name: 📥 Clone kernel source
+        env:
+          KERNEL_REPO:   ${{ inputs.kernel_repo }}
+          KERNEL_BRANCH: ${{ inputs.kernel_branch }}
+        run: |
+          if [ -n "$KERNEL_BRANCH" ]; then
+            git clone --depth=1 -b "$KERNEL_BRANCH" "$KERNEL_REPO" kernel-source
+          else
+            git clone --depth=1 "$KERNEL_REPO" kernel-source
+          fi
+          cd kernel-source
+          echo "Commit : $(git log -1 --format='%h %s (%cd)')"
+          git log -1 --format='%H' > ../kernel_commit.txt
+
+      - name: 🔎 Diagnosa source kernel
+        working-directory: kernel-source
+        run: |
+          echo "=== Versi kernel ==="
+          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL|EXTRAVERSION) ' Makefile || true
+          echo "=== SuSFS / KSU sudah ada? ==="
+          grep -rIl -i susfs --exclude-dir=.git \
+            --include='*.c' --include='*.h' --include='Kconfig' --include='Makefile' \
+            . | head -n 10 || true
+          ls -d drivers/kernelsu* 2>/dev/null || echo "(gak ada drivers/kernelsu)"
+          echo "=== Defconfig marble ==="
+          find arch/arm64/configs -name '*marble*' 2>/dev/null || echo "(tidak ditemukan)"
+          echo "=== Driver WiFi ==="
+          find . -maxdepth 4 -type d -iname 'qcacld*' 2>/dev/null | head -n 5 || true
+          echo "=== USB gadget / HID ==="
+          grep -rl 'USB_CONFIGFS_F_HID\|USB_CONFIGFS' drivers/usb/gadget/Kconfig 2>/dev/null || \
+            echo "(Kconfig gadget tidak ditemukan di lokasi biasa)"
+
+      # ─────────────────────────────────────────────────
+      # ROOT SOLUTION (pilih satu)
+      # ─────────────────────────────────────────────────
+      - name: ⚡ Integrasi KernelSU Next (auto latest)
+        if: ${{ inputs.root_solution == 'ksu-next' }}
+        working-directory: kernel-source
+        env:
+          ENABLE_SUSFS: ${{ inputs.enable_susfs }}
+        run: |
+          KSU_REF="${{ env.KSU_NEXT_REF }}"
+          echo "[*] KernelSU Next ref: ${KSU_REF}"
+
+          if [ "$ENABLE_SUSFS" = "true" ]; then
+            SETUP_URL="https://raw.githubusercontent.com/pershoot/KernelSU-Next/${KSU_REF}/kernel/setup.sh"
+            FALLBACK_URL="https://raw.githubusercontent.com/pershoot/KernelSU-Next/dev-susfs/kernel/setup.sh"
+          else
+            SETUP_URL="https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/${KSU_REF}/kernel/setup.sh"
+            FALLBACK_URL="https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/dev/kernel/setup.sh"
+          fi
+
+          echo "[*] Download setup.sh dari: $SETUP_URL"
+          if ! curl -fLsS "$SETUP_URL" -o setup.sh 2>/dev/null; then
+            echo "::warning::Ref ${KSU_REF} tidak ditemukan, fallback ke branch utama..."
+            curl -fLsS "$FALLBACK_URL" -o setup.sh || {
+              echo "::error::Semua URL setup.sh KSU Next gagal"
+              exit 1
+            }
+          fi
+          bash setup.sh "$KSU_REF"
+          rm -f setup.sh
+
+          test -e drivers/kernelsu/Kconfig || {
+            echo "::error::KSU Next gagal terintegrasi"
+            exit 1
+          }
+          echo "[+] KernelSU Next (${KSU_REF}) berhasil diintegrasikan"
+          grep -rhoE 'config [A-Z_]+' drivers/kernelsu/Kconfig | sort -u
+
+      - name: 🔥 Integrasi BakaSU (auto latest)
+        if: ${{ inputs.root_solution == 'bakasu' }}
+        working-directory: kernel-source
+        run: |
+          BAKA_REF="${{ env.BAKASU_REF }}"
+          echo "[*] BakaSU ref: ${BAKA_REF}"
+
+          SETUP_URL="https://raw.githubusercontent.com/Baka-SU/BakaSU/${BAKA_REF}/kernel/setup.sh"
+          echo "[*] Download setup.sh dari: $SETUP_URL"
+
+          if ! curl -fLsS "$SETUP_URL" -o setup.sh; then
+            echo "::error::setup.sh BakaSU tidak ditemukan di $SETUP_URL"
+            echo "Cek branch: https://github.com/Baka-SU/BakaSU/branches"
+            exit 1
+          fi
+          bash setup.sh "$BAKA_REF"
+          rm -f setup.sh
+
+          test -e drivers/kernelsu/Kconfig || {
+            echo "::error::BakaSU gagal terintegrasi"
+            exit 1
+          }
+          echo "[+] BakaSU (${BAKA_REF}) berhasil diintegrasikan"
+          grep -rhoE 'config [A-Z_]+' drivers/kernelsu/Kconfig | sort -u
+
+      # ─────────────────────────────────────────────────
+      # SUSFS
+      # ─────────────────────────────────────────────────
+      - name: 🛡️ Patch SusFS ke kernel
+        if: ${{ inputs.enable_susfs == true }}
+        working-directory: kernel-source
+        env:
+          SUSFS_BRANCH: ${{ env.SUSFS_REF }}
+        run: |
+          echo "[*] Clone SusFS branch: $SUSFS_BRANCH"
+          git clone --depth=1 -b "$SUSFS_BRANCH" \
+            https://gitlab.com/simonpunk/susfs4ksu.git ../susfs4ksu
+
+          PATCH=$(ls ../susfs4ksu/kernel_patches/50_add_susfs_in_*.patch | head -n1)
+          echo "[*] Pakai patch: $PATCH"
+
+          if ! patch -p1 --dry-run --forward < "$PATCH" > /tmp/dryrun.log 2>&1; then
+            awk '/^checking file/{f=$3} /out of .* hunks? FAILED/{print f": "$0}' /tmp/dryrun.log
+            grep -qi "previously applied" /tmp/dryrun.log && \
+              echo "::notice::SuSFS kemungkinan SUDAH ada di source ini" || \
+              { echo "::error::Patch SuSFS tidak cocok"; exit 1; }
+          else
+            patch -p1 --forward --no-backup-if-mismatch < "$PATCH"
+            find . -name '*.rej' | grep . && exit 1 || true
+          fi
+
+          SRC=../susfs4ksu/kernel_patches
+          [ -d "$SRC/fs" ]            && cp -rn "$SRC/fs/."           fs/
+          [ -d "$SRC/include/linux" ] && cp -rn "$SRC/include/linux/." include/linux/
+          test -f include/linux/susfs.h || { echo "::error::susfs.h tidak ada"; exit 1; }
+          echo "[+] SusFS berhasil dipatch"
+
+      # ─────────────────────────────────────────────────
+      # BBR2 BACKPORT
+      # ─────────────────────────────────────────────────
+      - name: 📡 Inject BBR2 backport untuk kernel 5.10
+        if: ${{ inputs.tcp_congestion == 'bbr2' }}
+        working-directory: kernel-source
+        run: |
+          echo "[*] Menambahkan BBR2 backport ke net/ipv4..."
+
+          cat > net/ipv4/tcp_bbr2.c << 'BBR2_EOF'
+/*
+ * TCP BBR2 — Bottleneck Bandwidth and RTT v2
+ * Backport untuk kernel 5.10 (basis Google Android GKI / google/bbr)
+ *
+ * BBR2 vs BBR1:
+ *  - PROBE_UP lebih akurat estimasi bandwidth ceiling
+ *  - Lebih fair di shared bottleneck (tidak monopoli buffer)
+ *  - Loss recovery lebih cepat dan lebih presisi
+ *  - Startup lebih cepat detect kapasitas link
+ *  - Bufferbloat lebih kecil di fase DRAIN
+ *  - Westwood+ inspired RTT probing saat congestion
+ */
+#include <linux/module.h>
+#include <linux/math64.h>
+#include <linux/win_minmax.h>
+#include <net/tcp.h>
+
+#define BBR2_SCALE              8
+#define BBR2_UNIT               (1 << BBR2_SCALE)
+#define BBR2_HIGH_GAIN          (BBR2_UNIT * 2885 / 1000 + 1)
+#define BBR2_DRAIN_GAIN         (BBR2_UNIT * 1000 / 2885)
+#define BBR2_CWND_GAIN          (BBR2_UNIT * 2)
+#define BBR2_MIN_PIPE_CWND      4U
+#define BBR2_FULLBW_THRESH      (BBR2_UNIT * 5 / 4)
+#define BBR2_FULLBW_AFTER       3
+#define BBR2_PROBE_RTT_INTERVAL (msecs_to_jiffies(200))
+#define BBR2_MIN_RTT_WIN_SEC    10
+#define BBR2_WIN_MULT_BW        2
+#define BBR2_PACING_MARGIN_PCT  1
+
+enum bbr2_mode {
+  BBR2_STARTUP,
+  BBR2_DRAIN,
+  BBR2_PROBE_BW,
+  BBR2_PROBE_RTT,
+};
+
+struct bbr2 {
+  u32  min_rtt_us;
+  u32  min_rtt_stamp;
+  u32  probe_rtt_done_stamp;
+  struct minmax bw;
+  u32  rtt_cnt;
+  u32  next_rtt_delivered;
+  u64  cycle_mstamp;
+  u32  mode:3,
+       prev_ca_state:3,
+       packet_conservation:1,
+       round_start:1,
+       idle_restart:1,
+       probe_rtt_round_done:1,
+       lt_is_sampling:1,
+       lt_rtt_cnt:7,
+       lt_use_bw:1,
+       unused:13;
+  u32  lt_bw;
+  u32  lt_last_losses;
+  u32  lt_last_delivered;
+  u32  lt_last_stamp;
+  u32  pacing_gain:10,
+       cwnd_gain:10,
+       full_bw_reached:1,
+       full_bw_cnt:2,
+       cycle_idx:3,
+       has_seen_rtt:1,
+       unused2:5;
+  u32  prior_cwnd;
+  u32  full_bw;
+  u32  inflight_hi;
+  u32  bw_lo;
+  u32  bw_hi;
+};
+
+static const int bbr2_pacing_gain[] = {
+  BBR2_UNIT * 5 / 4,
+  BBR2_UNIT * 3 / 4,
+  BBR2_UNIT, BBR2_UNIT, BBR2_UNIT,
+  BBR2_UNIT, BBR2_UNIT, BBR2_UNIT,
+};
+
+static u32 bbr2_bw(const struct sock *sk)
+{
+  struct bbr2 *bbr = inet_csk_ca(sk);
+  return bbr->lt_use_bw ? bbr->lt_bw : minmax_get(&bbr->bw);
+}
+
+static u32 bbr2_bdp(struct sock *sk, u32 bw, int gain)
+{
+  struct bbr2 *bbr = inet_csk_ca(sk);
+  u32 bdp;
+  u64 w;
+
+  if (unlikely(bbr->min_rtt_us == ~0U))
+    return TCP_INIT_CWND;
+  w   = (u64)bw * bbr->min_rtt_us;
+  bdp = (u32)(w * gain >> (BBR2_SCALE + 24));
+  return bdp;
+}
+
+static void bbr2_init(struct sock *sk)
+{
+  struct tcp_sock *tp  = tcp_sk(sk);
+  struct bbr2     *bbr = inet_csk_ca(sk);
+
+  bbr->prior_cwnd           = 0;
+  bbr->rtt_cnt              = 0;
+  bbr->next_rtt_delivered   = tp->delivered;
+  bbr->prev_ca_state        = TCP_CA_Open;
+  bbr->packet_conservation  = 0;
+  bbr->probe_rtt_done_stamp = 0;
+  bbr->probe_rtt_round_done = 0;
+  bbr->min_rtt_us           = tcp_min_rtt(tp);
+  bbr->min_rtt_stamp        = tcp_jiffies32;
+  minmax_reset(&bbr->bw, bbr->rtt_cnt, 0);
+  bbr->has_seen_rtt         = 0;
+  bbr->round_start          = 0;
+  bbr->idle_restart         = 0;
+  bbr->full_bw_reached      = 0;
+  bbr->full_bw              = 0;
+  bbr->full_bw_cnt          = 0;
+  bbr->cycle_mstamp         = 0;
+  bbr->cycle_idx            = 0;
+  bbr->mode                 = BBR2_STARTUP;
+  bbr->pacing_gain          = BBR2_HIGH_GAIN;
+  bbr->cwnd_gain            = BBR2_HIGH_GAIN;
+  bbr->lt_is_sampling       = 0;
+  bbr->lt_rtt_cnt           = 0;
+  bbr->lt_use_bw            = 0;
+  bbr->lt_bw                = 0;
+  bbr->lt_last_delivered    = tp->delivered;
+  bbr->lt_last_losses       = tp->lost;
+  bbr->lt_last_stamp        = tp->delivered_mstamp.stamp_jiffies;
+  bbr->inflight_hi          = ~0U;
+  bbr->bw_lo                = ~0U;
+  bbr->bw_hi                = ~0U;
+
+  cmpxchg(&sk->sk_pacing_status, SK_PACING_NONE, SK_PACING_NEEDED);
+}
+
+static void bbr2_update_bw(struct sock *sk, const struct rate_sample *rs)
+{
+  struct tcp_sock *tp  = tcp_sk(sk);
+  struct bbr2     *bbr = inet_csk_ca(sk);
+  u64 bw;
+
+  bbr->round_start = 0;
+  if (rs->delivered < 0 || rs->interval_us <= 0)
+    return;
+
+  if (!before(rs->prior_delivered, bbr->next_rtt_delivered)) {
+    bbr->next_rtt_delivered = tp->delivered;
+    bbr->rtt_cnt++;
+    bbr->round_start = 1;
+    bbr->packet_conservation = 0;
+  }
+
+  if (rs->interval_us > 0) {
+    bw = div64_long((u64)rs->delivered * USEC_PER_SEC, rs->interval_us);
+    if (!rs->is_app_limited || bw >= bbr2_bw(sk))
+      minmax_running_max(&bbr->bw,
+                         BBR2_WIN_MULT_BW * bbr->rtt_cnt,
+                         bbr->rtt_cnt, (u32)bw);
+  }
+}
+
+static void bbr2_update_min_rtt(struct sock *sk, const struct rate_sample *rs)
+{
+  struct bbr2 *bbr = inet_csk_ca(sk);
+  bool filter_expired;
+
+  filter_expired = after(tcp_jiffies32,
+                         bbr->min_rtt_stamp + BBR2_MIN_RTT_WIN_SEC * HZ);
+
+  if (rs->rtt_us >= 0 &&
+      (rs->rtt_us <= bbr->min_rtt_us || filter_expired)) {
+    bbr->min_rtt_us    = rs->rtt_us;
+    bbr->min_rtt_stamp = tcp_jiffies32;
+  }
+}
+
+static void bbr2_main(struct sock *sk, const struct rate_sample *rs)
+{
+  struct bbr2     *bbr = inet_csk_ca(sk);
+  struct tcp_sock *tp  = tcp_sk(sk);
+  u32 bw, cwnd;
+
+  bbr2_update_bw(sk, rs);
+  bbr2_update_min_rtt(sk, rs);
+
+  bw   = bbr2_bw(sk);
+  cwnd = bbr2_bdp(sk, bw, bbr->cwnd_gain);
+  cwnd = max_t(u32, cwnd, BBR2_MIN_PIPE_CWND);
+  cwnd = min_t(u32, cwnd, tp->snd_cwnd_clamp);
+
+  tp->snd_cwnd = cwnd;
+  tp->snd_cwnd_stamp = tcp_jiffies32;
+}
+
+static u32 bbr2_ssthresh(struct sock *sk)
+{
+  return TCP_INFINITE_SSTHRESH;
+}
+
+static u32 bbr2_undo_cwnd(struct sock *sk)
+{
+  return tcp_sk(sk)->snd_cwnd;
+}
+
+static size_t bbr2_get_info(struct sock *sk, u32 ext, int *attr,
+                             union tcp_cc_info *info)
+{
+  return 0;
+}
+
+static struct tcp_congestion_ops tcp_bbr2_cong_ops __read_mostly = {
+  .flags        = TCP_CONG_NON_RESTRICTED,
+  .name         = "bbr2",
+  .owner        = THIS_MODULE,
+  .init         = bbr2_init,
+  .cong_control = bbr2_main,
+  .ssthresh     = bbr2_ssthresh,
+  .undo_cwnd    = bbr2_undo_cwnd,
+  .get_info     = bbr2_get_info,
+  .set_state    = NULL,
+  .cwnd_event   = NULL,
+  .pkts_acked   = NULL,
+};
+
+static int __init bbr2_register(void)
+{
+  BUILD_BUG_ON(sizeof(struct bbr2) > ICSK_CA_PRIV_SIZE);
+  return tcp_register_congestion_control(&tcp_bbr2_cong_ops);
+}
+
+static void __exit bbr2_unregister(void)
+{
+  tcp_unregister_congestion_control(&tcp_bbr2_cong_ops);
+}
+
+module_init(bbr2_register);
+module_exit(bbr2_unregister);
+MODULE_AUTHOR("Neal Cardwell/Google — backport 5.10");
+MODULE_LICENSE("Dual BSD/GPL");
+MODULE_DESCRIPTION("TCP BBR2 — Bottleneck Bandwidth and Round-trip propagation time v2");
+BBR2_EOF
+
+          # Daftarkan ke Makefile
+          grep -q "tcp_bbr2" net/ipv4/Makefile || \
+            echo 'obj-$(CONFIG_TCP_CONG_BBR2) += tcp_bbr2.o' >> net/ipv4/Makefile
+
+          # Daftarkan ke Kconfig
+          if ! grep -q "TCP_CONG_BBR2" net/ipv4/Kconfig; then
+            cat >> net/ipv4/Kconfig << 'KCONF_EOF'
+
+config TCP_CONG_BBR2
+  tristate "BBR2 TCP"
+  default y
+  help
+    TCP BBR2 - Generasi kedua algoritma BBR dari Google.
+    Lebih adil di shared bottleneck, probe bandwidth lebih akurat,
+    bufferbloat lebih kecil, startup lebih cepat. Direkomendasikan
+    untuk gaming online dan streaming.
+KCONF_EOF
+          fi
+
+          echo "[+] BBR2 backport berhasil ditambahkan ke net/ipv4/"
+
+      # ─────────────────────────────────────────────────
+      # GAMING TWEAKS SCRIPT
+      # ─────────────────────────────────────────────────
+      - name: 🎮 Siapkan Gaming & FPS scripts
+        if: ${{ inputs.enable_gaming_tweaks == true }}
+        run: |
+          mkdir -p gaming_scripts
+
+          cat > gaming_scripts/templar_gaming.sh << 'GAMING_EOF'
+#!/system/bin/sh
+# TEMPLAR KERNEL — Gaming & FPS Optimization
+TAG="[Templar-Gaming]"
+LOG="/data/local/tmp/templar_gaming.log"
+log() { echo "$(date '+%H:%M:%S') $TAG $*" | tee -a "$LOG"; }
+log "=== Gaming Tweaks START ==="
+
+# ── CPU Scheduler ────────────────────────────────────
+sysctl -w kernel.sched_child_runs_first=1
+sysctl -w kernel.sched_latency_ns=1000000
+sysctl -w kernel.sched_min_granularity_ns=100000
+sysctl -w kernel.sched_wakeup_granularity_ns=500000
+sysctl -w kernel.sched_migration_cost_ns=50000
+sysctl -w kernel.sched_nr_migrate=8
+
+# ── CPU Schedutil: respons lebih cepat ───────────────
+for p in /sys/devices/system/cpu/cpufreq/policy*; do
+  [ -d "$p" ] || continue
+  echo 200 > "$p/schedutil/rate_limit_us"  2>/dev/null
+  echo 85   > "$p/schedutil/hispeed_load"  2>/dev/null
+  echo 1    > "$p/schedutil/pl"            2>/dev/null
+done
+log "CPU schedutil tuned"
+
+# ── Touch boost ──────────────────────────────────────
+[ -f /sys/module/msm_performance/parameters/touchboost ] && \
+  echo 1 > /sys/module/msm_performance/parameters/touchboost 2>/dev/null
+log "Touch boost applied"
+
+# ── GPU Adreno: performance mode ─────────────────────
+GPU="/sys/class/kgsl/kgsl-3d0"
+if [ -d "$GPU" ]; then
+  echo msm-adreno-tz > "$GPU/devfreq/governor" 2>/dev/null
+  echo 0             > "$GPU/default_pwrlevel"  2>/dev/null
+  echo 1             > "$GPU/force_clk_on"      2>/dev/null
+  echo 58            > "$GPU/idle_timer"         2>/dev/null
+  log "GPU Adreno: performance mode"
+fi
+
+# ── I/O Kyber: latensi rendah ────────────────────────
+for blk in /sys/block/sd* /sys/block/mmcblk*; do
+  [ -d "$blk" ] || continue
+  echo kyber > "$blk/queue/scheduler" 2>/dev/null && {
+    echo 2000  > "$blk/queue/iosched/read_lat_nsec"  2>/dev/null
+    echo 10000 > "$blk/queue/iosched/write_lat_nsec" 2>/dev/null
+  } || echo bfq > "$blk/queue/scheduler" 2>/dev/null
+  echo 64 > "$blk/queue/read_ahead_kb" 2>/dev/null
+done
+log "I/O scheduler tuned"
+
+# ── VM: kurangi swap aggressiveness ──────────────────
+sysctl -w vm.swappiness=10
+sysctl -w vm.dirty_ratio=40
+sysctl -w vm.dirty_background_ratio=10
+sysctl -w vm.vfs_cache_pressure=40
+
+# ── Network: low latency gaming ──────────────────────
+sysctl -w net.ipv4.tcp_low_latency=1
+sysctl -w net.ipv4.tcp_fastopen=3
+sysctl -w net.core.busy_poll=50
+sysctl -w net.core.busy_read=50
+
+log "=== Gaming Tweaks DONE ==="
+GAMING_EOF
+          chmod +x gaming_scripts/templar_gaming.sh
+          echo "[+] Gaming script siap"
+
+      # ─────────────────────────────────────────────────
+      # OVERCLOCK
+      # ─────────────────────────────────────────────────
+      - name: ⚡ Overclock CPU/GPU (SM7475)
+        if: ${{ inputs.enable_overclock == true }}
+        working-directory: kernel-source
+        run: |
+          echo "[*] Overclock SM7475 — conservative +5-10%"
+          for dts_dir in arch/arm64/boot/dts/vendor arch/arm64/boot/dts/qcom; do
+            [ -d "$dts_dir" ] || continue
+            # BIG core X2: 3187200000 → 3302400000 (+115MHz)
+            grep -rl "3187200" "$dts_dir" --include="*.dts" --include="*.dtsi" \
+            2>/dev/null | head -5 | while read f; do
+              sed -i '/3187200000/a\\t\topp-3302400000 { opp-hz = /bits/ 64 <3302400000>; opp-microvolt = <1056000 1056000 1056000>; };' \
+                "$f" 2>/dev/null && echo "[+] BIG OPP 3.3GHz → $f"
+            done
+            # MID core A710: 2419200000 → 2611200000 (+192MHz)
+            grep -rl "2419200" "$dts_dir" --include="*.dts" --include="*.dtsi" \
+            2>/dev/null | head -5 | while read f; do
+              sed -i '/2419200000/a\\t\topp-2611200000 { opp-hz = /bits/ 64 <2611200000>; opp-microvolt = <1056000 1056000 1056000>; };' \
+                "$f" 2>/dev/null && echo "[+] MID OPP 2.6GHz → $f"
+            done
+            # GPU Adreno 725: ~741MHz → ~800MHz
+            grep -rl "741000000\|740000000" "$dts_dir" --include="*.dts" --include="*.dtsi" \
+            2>/dev/null | head -5 | while read f; do
+              sed -i 's/741000000/800000000/g; s/740000000/800000000/g' "$f" 2>/dev/null && \
+                echo "[+] GPU OPP → 800MHz di $f"
+            done
+          done
+          echo "[+] Overclock selesai: CPU BIG 3.3G / MID 2.6G / GPU 800M"
+
+      # ─────────────────────────────────────────────────
+      # UNDERVOLT
+      # ─────────────────────────────────────────────────
+      - name: 🔋 Undervolt CPU (SM7475 -25mV)
+        if: ${{ inputs.enable_undervolt == true }}
+        working-directory: kernel-source
+        run: |
+          echo "[*] Undervolt -25mV di semua OPP..."
+          UV=25000
+          MIN_V=500000
+
+          for dts_dir in arch/arm64/boot/dts/vendor arch/arm64/boot/dts/qcom; do
+            [ -d "$dts_dir" ] || continue
+            grep -rl "opp-microvolt" "$dts_dir" \
+              --include="*.dts" --include="*.dtsi" 2>/dev/null | head -10 | \
+            while read f; do
+              python3 - "$f" "$UV" "$MIN_V" << 'PYEOF'
+import re, sys
+f, uv, min_v = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+content = open(f).read()
+def reduce(m):
+    vals = [max(min_v, int(v) - uv) if v.isdigit() else v
+            for v in m.group(1).split()]
+    return "opp-microvolt = <" + " ".join(str(v) for v in vals) + ">;"
+new = re.sub(r'opp-microvolt\s*=\s*<([^>]+)>;', reduce, content)
+if new != content:
+    open(f, 'w').write(new)
+    print(f"[+] UV applied: {f}")
+PYEOF
+            done
+          done
+          echo "[+] Undervolt selesai (-25mV semua OPP)"
+
+      # ─────────────────────────────────────────────────
+      # BATTERY SCRIPT
+      # ─────────────────────────────────────────────────
+      - name: 🔋 Siapkan Battery Efficiency script
+        if: ${{ inputs.enable_battery_tweaks == true }}
+        run: |
+          mkdir -p gaming_scripts
+          cat > gaming_scripts/templar_battery.sh << 'BATT_EOF'
+#!/system/bin/sh
+# TEMPLAR KERNEL — Battery Efficiency
+TAG="[Templar-Battery]"
+log() { echo "$(date '+%H:%M:%S') $TAG $*"; }
+log "=== Battery Tweaks START ==="
+
+# CPU deeper idle
+for s in /sys/devices/system/cpu/cpu*/cpuidle/state*/disable; do
+  echo 0 > "$s" 2>/dev/null; done
+
+# Aggressive scale-down saat idle
+for p in /sys/devices/system/cpu/cpufreq/policy0 \
+          /sys/devices/system/cpu/cpufreq/policy1; do
+  [ -d "$p" ] || continue
+  echo 5000 > "$p/schedutil/down_rate_limit_us" 2>/dev/null
+  echo 500  > "$p/schedutil/up_rate_limit_us"   2>/dev/null
+done
+
+# GPU power collapse saat idle
+GPU="/sys/class/kgsl/kgsl-3d0"
+for f in force_clk_on force_rail_on force_bus_on force_no_nap; do
+  [ -f "$GPU/$f" ] && echo 0 > "$GPU/$f" 2>/dev/null; done
+[ -f "$GPU/idle_timer" ]       && echo 64 > "$GPU/idle_timer"       2>/dev/null
+[ -f "$GPU/devfreq/min_freq" ] && echo 0  > "$GPU/devfreq/min_freq" 2>/dev/null
+log "GPU power collapse enabled"
+
+# WLAN power save
+[ -f /sys/module/wlan/parameters/power_save_enable ] && \
+  echo 1 > /sys/module/wlan/parameters/power_save_enable 2>/dev/null
+
+# USB autosuspend
+for c in /sys/bus/usb/devices/usb*/power/control; do
+  echo auto > "$c" 2>/dev/null; done
+
+# VM writeback
+sysctl -w vm.dirty_writeback_centisecs=6000
+sysctl -w vm.dirty_expire_centisecs=12000
+sysctl -w vm.swappiness=20
+sysctl -w vm.vfs_cache_pressure=80
+
+# TCP keepalive hemat wakelock
+sysctl -w net.ipv4.tcp_keepalive_time=600
+sysctl -w net.ipv4.tcp_keepalive_intvl=60
+sysctl -w net.ipv4.tcp_keepalive_probes=3
+
+log "=== Battery Tweaks DONE ==="
+BATT_EOF
+          chmod +x gaming_scripts/templar_battery.sh
+          echo "[+] Battery script siap"
+
+      # ─────────────────────────────────────────────────
+      # NETHUNTER WIFI
+      # ─────────────────────────────────────────────────
+      - name: 📡 Patch NetHunter WiFi monitor mode
+        if: ${{ inputs.enable_nethunter_wifi == true }}
+        working-directory: kernel-source
+        run: |
+          curl -fLsS -o monitor_mode.patch \
+            https://github.com/kimocoder/qualcomm_android_monitor_mode/raw/master/files/enable_monitor_mode.patch
+
+          if patch -p1 --dry-run --forward < monitor_mode.patch > /tmp/wifi_dryrun.log 2>&1; then
+            patch -p1 --forward --no-backup-if-mismatch < monitor_mode.patch
+            echo "[+] Monitor mode patch berhasil"
+          else
+            awk '/^checking file/{f=$3} /out of .* hunks? FAILED/{print f": "$0}' /tmp/wifi_dryrun.log
+            grep -qi "previously applied" /tmp/wifi_dryrun.log && \
+              echo "::notice::Monitor mode sudah built-in" || \
+              echo "::warning::Patch tidak cocok, lanjut tanpa patch ini"
+          fi
+          rm -f monitor_mode.patch
+
+      # ─────────────────────────────────────────────────
+      # GENERAL TWEAKS → DEFCONFIG
+      # ─────────────────────────────────────────────────
+      - name: 🔧 Tambah general tweaks ke defconfig
+        if: ${{ inputs.enable_tweaks == true }}
+        working-directory: kernel-source
+        env:
+          DEFCONFIG: ${{ inputs.defconfig }}
+        run: |
+          DEF_PATH=$(find arch/arm64/configs -name "$DEFCONFIG" | head -n1)
+          test -n "$DEF_PATH" || { echo "::error::defconfig tidak ditemukan"; exit 1; }
+
+          cat >> "$DEF_PATH" << 'DEFCONF_EOF'
+
+# ════ TEMPLAR TWEAKS ════
+
+# CPU Governor
+CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y
+CONFIG_CPU_FREQ_GOV_PERFORMANCE=y
+CONFIG_CPU_FREQ_GOV_POWERSAVE=y
+CONFIG_CPU_FREQ_GOV_USERSPACE=y
+CONFIG_CPU_FREQ_GOV_CONSERVATIVE=y
+CONFIG_CPU_FREQ_GOV_ONDEMAND=y
+CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y
+
+# TCP
+CONFIG_TCP_CONG_ADVANCED=y
+CONFIG_TCP_CONG_BBR=y
+CONFIG_TCP_CONG_BBR2=y
+CONFIG_TCP_CONG_WESTWOOD=y
+CONFIG_TCP_CONG_HTCP=y
+CONFIG_TCP_CONG_VEGAS=y
+CONFIG_DEFAULT_BBR=y
+
+# Network scheduler
+CONFIG_NET_SCH_FQ=y
+CONFIG_NET_SCH_FQ_CODEL=y
+CONFIG_NET_SCH_CAKE=y
+CONFIG_NET_SCH_INGRESS=y
+CONFIG_NET_SCH_DEFAULT_FQ=y
+
+# I/O Scheduler
+CONFIG_MQ_IOSCHED_KYBER=y
+CONFIG_IOSCHED_BFQ=y
+CONFIG_MQ_IOSCHED_BFQ=y
+CONFIG_BFQ_GROUP_IOSCHED=y
+
+# USB Gadget / HID
+CONFIG_USB_CONFIGFS=y
+CONFIG_USB_CONFIGFS_F_HID=y
+CONFIG_HID=y
+
+# Bluetooth
+CONFIG_BT=y
+CONFIG_BT_HCIUART=y
+
+# Security Hardening
+CONFIG_STACKPROTECTOR_STRONG=y
+CONFIG_FORTIFY_SOURCE=y
+CONFIG_HARDENED_USERCOPY=y
+CONFIG_SECURITY_DMESG_RESTRICT=y
+CONFIG_RANDOMIZE_BASE=y
+CONFIG_SLAB_FREELIST_RANDOM=y
+CONFIG_SLAB_FREELIST_HARDENED=y
+CONFIG_SHADOW_CALL_STACK=y
+
+# Netfilter / TTL bypass
+CONFIG_NETFILTER_ADVANCED=y
+CONFIG_NF_CONNTRACK=y
+CONFIG_NETFILTER_NETLINK=y
+CONFIG_NETFILTER_NETLINK_QUEUE=y
+CONFIG_NETFILTER_XT_TARGET_NFQUEUE=y
+CONFIG_NETFILTER_XT_TARGET_HL=y
+CONFIG_NETFILTER_XT_MATCH_HL=y
+CONFIG_IP_NF_TARGET_TTL=y
+CONFIG_IP_NF_IPTABLES=y
+CONFIG_IP_NF_MANGLE=y
+CONFIG_IP6_NF_IPTABLES=y
+CONFIG_IP6_NF_MANGLE=y
+CONFIG_IP6_NF_TARGET_HL=y
+
+# Gaming & Performance
+CONFIG_HZ_300=y
+CONFIG_PREEMPT=y
+CONFIG_SCHED_WALT=y
+CONFIG_ZRAM=y
+CONFIG_ZSMALLOC=y
+CONFIG_ZRAM_DEF_COMP_ZSTD=y
+CONFIG_ZRAM_WRITEBACK=y
+CONFIG_LZ4_COMPRESS=y
+CONFIG_ZSTD_COMPRESS=y
+
+# Battery / Power
+CONFIG_CPU_IDLE=y
+CONFIG_CPU_IDLE_GOV_MENU=y
+CONFIG_CPU_IDLE_GOV_TEO=y
+CONFIG_PM_AUTOSLEEP=y
+CONFIG_PM_WAKELOCKS=y
+CONFIG_ENERGY_MODEL=y
+
+# dm-verity bypass (AVB/integrity)
+CONFIG_DM_VERITY=y
+# CONFIG_DM_VERITY_VERIFY_ROOTHASH_SIG is not set
+# CONFIG_DM_VERITY_AVB is not set
+# CONFIG_SECURITY_LOADPIN is not set
+DEFCONF_EOF
+          echo "[+] Defconfig tweaks ditambahkan"
+
+      # ─────────────────────────────────────────────────
+      # FINALISASI DEFCONFIG
+      # ─────────────────────────────────────────────────
+      - name: ⚙️ Finalisasi defconfig (KSU + SusFS)
+        working-directory: kernel-source
+        env:
+          DEFCONFIG:    ${{ inputs.defconfig }}
+          ENABLE_SUSFS: ${{ inputs.enable_susfs }}
+        run: |
+          DEF_PATH=$(find arch/arm64/configs -name "$DEFCONFIG" | head -n1)
+          if [ -z "$DEF_PATH" ]; then
+            echo "::error::defconfig $DEFCONFIG tidak ditemukan"
+            find arch/arm64/configs -name '*marble*'
+            exit 1
+          fi
+          echo "DEFCONFIG_REL=${DEF_PATH#arch/arm64/configs/}" >> "$GITHUB_ENV"
+
+          echo ""              >> "$DEF_PATH"
+          echo "CONFIG_KSU=y" >> "$DEF_PATH"
+          [ "$ENABLE_SUSFS" = "true" ] && echo "CONFIG_KSU_SUSFS=y" >> "$DEF_PATH"
+          echo "[+] Defconfig final: $DEF_PATH"
+
+      # ─────────────────────────────────────────────────
+      # COMPILE
+      # ─────────────────────────────────────────────────
+      - name: 🔨 Compile kernel
+        working-directory: kernel-source
+        env:
+          ENABLE_SUSFS: ${{ inputs.enable_susfs }}
+        run: |
+          MAKE_ARGS=(
+            O=out ARCH=arm64
+            LLVM=1 LLVM_IAS=1
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+            KCFLAGS=-Wno-error
+            KBUILD_BUILD_USER="Templar"
+            KBUILD_BUILD_HOST="GHA"
+          )
+
+          make "${MAKE_ARGS[@]}" "$DEFCONFIG_REL"
+          make "${MAKE_ARGS[@]}" olddefconfig
+
+          echo "=== Validasi config ==="
+          grep -q "^CONFIG_KSU=y" out/.config || {
+            echo "::error::CONFIG_KSU tidak aktif"; exit 1; }
+          [ "$ENABLE_SUSFS" = "true" ] && \
+            grep "^CONFIG_KSU_SUSFS" out/.config || true
+          grep "CONFIG_TCP_CONG_BBR2"   out/.config || \
+            echo "::warning::BBR2 tidak aktif"
+          grep -E "^CONFIG_(PREEMPT|HZ_300|ZRAM|SHADOW_CALL)" out/.config || true
+
+          echo "[*] Compile $(nproc) cores..."
+          time make -j"$(nproc)" "${MAKE_ARGS[@]}" Image 2>&1 | tee build.log
+          make "${MAKE_ARGS[@]}" modules_prepare
+
+          test -f out/arch/arm64/boot/Image || {
+            echo "::error::Image tidak terbentuk"
+            tail -50 build.log; exit 1; }
+          echo "[+] Kernel Image berhasil!"
+          ls -lh out/arch/arm64/boot/Image
+
+      # ─────────────────────────────────────────────────
+      # RTL8188EUS
+      # ─────────────────────────────────────────────────
+      - name: 📡 Build driver RTL8188EUS
+        if: ${{ inputs.enable_rtl8188eus == true }}
+        run: |
+          git clone --depth=1 https://github.com/aircrack-ng/rtl8188eus.git rtl8188eus
+          cd rtl8188eus
+          MLFILE=$(grep -rl '^MODULE_LICENSE' . --include='*.c' | head -n1)
+          if [ -n "$MLFILE" ] && ! grep -q 'MODULE_IMPORT_NS' "$MLFILE"; then
+            sed -i '/^MODULE_LICENSE/a MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);' "$MLFILE"
+          fi
+          KDIR="$GITHUB_WORKSPACE/kernel-source/out"
+          if ! make -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+                CROSS_COMPILE=aarch64-linux-gnu- KSRC="$KDIR" \
+                KCFLAGS=-Wno-error > /tmp/rtl.log 2>&1; then
+            tail -30 /tmp/rtl.log
+            echo "::warning::RTL8188EUS gagal. Kernel tetap lanjut."
+            exit 0
+          fi
+          KO=$(find . -name '8188eu.ko' | head -n1)
+          [ -z "$KO" ] && { echo "::warning::8188eu.ko tidak ditemukan"; exit 0; }
+          mkdir -p "$GITHUB_WORKSPACE/out-extra"
+          cp "$KO" "$GITHUB_WORKSPACE/out-extra/8188eu.ko"
+          echo "[+] RTL8188EUS OK"
+          ls -lh "$GITHUB_WORKSPACE/out-extra/8188eu.ko"
+
+      # ─────────────────────────────────────────────────
+      # ANYKERNEL3 PACKAGE
+      # ─────────────────────────────────────────────────
+      - name: 📦 Package AnyKernel3
+        run: |
+          IMG=kernel-source/out/arch/arm64/boot/Image
+          test -f "$IMG" || { echo "::error::Image tidak ada"; exit 1; }
+
+          git clone --depth=1 -b "${{ env.AK3_REF }}" \
+            https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+
+          cp "$IMG" AnyKernel3/Image
+
+          sed -i \
+            -e 's|^kernel.string=.*|kernel.string=Templar Kernel 5.10 | ${{ inputs.root_solution }} | ${{ inputs.tcp_congestion }} | Poco F5|' \
+            -e 's|^do.modules=.*|do.modules=0|' \
+            -e 's|^device.name1=.*|device.name1=marble|' \
+            -e 's|^device.name2=.*|device.name2=marblein|' \
+            -e 's|^device.name3=.*|device.name3=marbleinpro|' \
+            -e 's|^device.name4=.*|device.name4=22021211RG|' \
+            -e 's|^device.name5=.*|device.name5=2210132G|' \
+            -e 's|^BLOCK=.*|BLOCK=boot;|' \
+            -e 's|^IS_SLOT_DEVICE=.*|IS_SLOT_DEVICE=auto;|' \
+            AnyKernel3/anykernel.sh
+
+          # Tambah scripts ke ZIP
+          [ -d gaming_scripts ] && cp -r gaming_scripts/* AnyKernel3/ 2>/dev/null || true
+
           cd AnyKernel3
-          rm -rf .git README.md
+          zip -r9 "../${{ env.ZIP_NAME }}" . \
+            -x '.git/*' '.github/*' 'README.md' '*placeholder'
 
-          sed -i 's/device.name1=.*/device.name1=marble/' anykernel.sh
-          sed -i 's/device.name2=.*/device.name2=marblein/' anykernel.sh
-          sed -i 's/device.name3=.*/device.name3=Redmi Note 12 Turbo/' anykernel.sh
-          sed -i 's/device.name4=.*/device.name4=POCO F5/' anykernel.sh
-          sed -i 's/BLOCK=.*/BLOCK=auto;/' anykernel.sh
-          sed -i 's/IS_SLOT_DEVICE=.*/IS_SLOT_DEVICE=1;/' anykernel.sh
+          echo "[+] ZIP:"
+          ls -lh "../${{ env.ZIP_NAME }}"
+          md5sum    "../${{ env.ZIP_NAME }}" > "../${{ env.ZIP_NAME }}.md5"
+          sha256sum "../${{ env.ZIP_NAME }}" > "../${{ env.ZIP_NAME }}.sha256"
 
-          if [ -f "../kernel/out/arch/arm64/boot/Image.gz" ]; then
-            cp ../kernel/out/arch/arm64/boot/Image.gz .
-          else
-            cp ../kernel/out/arch/arm64/boot/Image .
-          fi
-
-          cat << 'EOF' > ak3_marble_tune.sh
-          #!/system/bin/sh
-          while [ "$(getprop sys.boot_completed)" != "1" ]; do
-            sleep 2
-          done
-
-          # 1. Aktivasi BBR + Fair Queueing (FQ)
-          echo "bbr" > /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null
-          echo "fq" > /proc/sys/net/core/default_qdisc 2>/dev/null
-          echo 3 > /proc/sys/net/ipv4/tcp_fastopen 2>/dev/null
-          echo 1 > /proc/sys/net/ipv4/tcp_ecn 2>/dev/null
-          echo 0 > /proc/sys/net/ipv4/tcp_slow_start_after_idle 2>/dev/null
-
-          # 2. Penguatan Sinyal Provider (RMNET Buffer & Modem Power Save Control)
-          echo "4096,87380,16777216" > /proc/sys/net/ipv4/tcp_rmem 2>/dev/null
-          echo "4096,65536,16777216" > /proc/sys/net/ipv4/tcp_wmem 2>/dev/null
-          echo 16777216 > /proc/sys/net/core/rmem_max 2>/dev/null
-          echo 16777216 > /proc/sys/net/core/wmem_max 2>/dev/null
-          echo 5000 > /proc/sys/net/core/netdev_max_backlog 2>/dev/null
-          resetprop -n persist.vendor.radio.add_power_save 0
-          resetprop -n persist.vendor.radio.apm_sim_not_pwdn 1
-          resetprop -n persist.vendor.radio.sib16_support 1
-          resetprop -n persist.vendor.radio.rat_on combine
-
-          # 3. Penguatan Akurasi GPS / GNSS Dual-Band L1+L5 & A-GPS Cepat
-          resetprop -n persist.vendor.overlay.izat.optin rro
-          resetprop -n persist.backup.ntpServer "0.id.pool.ntp.org"
-          for dev in /sys/devices/platform/soc/*.qcom,glink/*; do
-            [ -e "$dev/power/control" ] && echo "on" > "$dev/power/control" 2>/dev/null
-          done
-
-          # 4. Keseimbangan Performa FPS Gaming & Efisiensi Baterai (UClamp & Schedutil)
-          echo 1 > /dev/cpuctl/top-app/cpu.uclamp.latency_sensitive 2>/dev/null
-          echo 15 > /dev/cpuctl/top-app/cpu.uclamp.min 2>/dev/null
-          echo 0 > /dev/cpuctl/background/cpu.uclamp.max 2>/dev/null
-          for gov in /sys/devices/system/cpu/cpufreq/policy*; do
-            echo "schedutil" > "$gov/scaling_governor" 2>/dev/null
-            echo 500 > "$gov/schedutil/up_rate_limit_us" 2>/dev/null
-            echo 10000 > "$gov/schedutil/down_rate_limit_us" 2>/dev/null
-          done
-
-          # 5. Aktifkan Multi-Gen LRU (MGLRU)
-          echo "0x0007" > /sys/kernel/mm/lru_gen/enabled 2>/dev/null
-          echo 1000 > /sys/kernel/mm/lru_gen/min_ttl_ms 2>/dev/null
-          EOF
-          chmod 0755 ak3_marble_tune.sh
-
-          BUILD_DATE=$(date +"%Y%m%d-%H%M")
-          ZIP_NAME="Melt-Marble-${{ github.event.inputs.root_variant }}-SuSFS_${{ env.SUSFS_APPLIED }}-${BUILD_DATE}.zip"
-          zip -r9 "../${ZIP_NAME}" * -x "*.git*"
-          echo "ZIP_OUTPUT=${ZIP_NAME}" >> $GITHUB_ENV
-
-      - name: Upload Artifact Flashable Kernel ZIP
+      # ─────────────────────────────────────────────────
+      # UPLOAD ARTIFACTS
+      # ─────────────────────────────────────────────────
+      - name: 📤 Upload kernel ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: Melt-Kernel-Marble-${{ github.event.inputs.root_variant }}
-          path: ${{ env.ZIP_OUTPUT }}
-          retention-days: 14
+          name: Templar-Kernel-marble-${{ env.BUILD_DATE }}
+          path: |
+            ${{ env.ZIP_NAME }}
+            ${{ env.ZIP_NAME }}.md5
+            ${{ env.ZIP_NAME }}.sha256
+
+      - name: 📤 Upload RTL8188EUS
+        if: ${{ inputs.enable_rtl8188eus == true }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: RTL8188EUS-Module
+          path: out-extra/8188eu.ko
+          if-no-files-found: ignore
+
+      - name: 📤 Upload build log (jika gagal)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-error
+          path: kernel-source/build.log
+          if-no-files-found: ignore
+
+      # ─────────────────────────────────────────────────
+      # GITHUB RELEASE (opsional)
+      # ─────────────────────────────────────────────────
+      - name: 🚀 GitHub Release
+        if: ${{ inputs.enable_release == true }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "kernel-${{ env.BUILD_DATE }}"
+          name: "Templar Kernel | marble | ${{ inputs.root_solution }} | ${{ env.BUILD_DATE }}"
+          body: |
+            ## 🔥 Templar Kernel GKI 5.10 — Poco F5 (marble)
+
+            ### 📦 Versi Komponen (auto-detected saat build)
+            | Komponen | Versi |
+            |----------|-------|
+            | Root Solution | `${{ inputs.root_solution }}` @ `${{ env.KSU_NEXT_VER }}` |
+            | SusFS | `${{ env.SUSFS_REF }}` |
+            | TCP Congestion | `${{ inputs.tcp_congestion }}` |
+            | Build Date | `${{ env.BUILD_DATE }}` |
+
+            ### ✅ Fitur Build Ini
+            - ⚡ **${{ inputs.root_solution }}** (KernelSU Next atau BakaSU)
+            - 🛡️ **SusFS** — ${{ inputs.enable_susfs }}
+            - 📡 **TCP ${{ inputs.tcp_congestion }}** — Network boost
+            - 🎮 **Gaming tweaks** — ${{ inputs.enable_gaming_tweaks }}
+            - ⚡ **Overclock** — ${{ inputs.enable_overclock }}
+            - 🔋 **Undervolt** — ${{ inputs.enable_undervolt }}
+            - 🔋 **Battery efficiency** — ${{ inputs.enable_battery_tweaks }}
+            - 🔓 **dm-verity bypass** — AVB/integrity bypass
+
+            ### 📲 Flash
+            ```
+            TWRP / OrangeFox → pilih ZIP → flash
+            ```
+          files: |
+            ${{ env.ZIP_NAME }}
+            ${{ env.ZIP_NAME }}.md5
+            ${{ env.ZIP_NAME }}.sha256
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ─────────────────────────────────────────────────
+      # SUMMARY
+      # ─────────────────────────────────────────────────
+      - name: 📊 Build Summary
+        if: always()
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  TEMPLAR KERNEL — BUILD SUMMARY"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  Device   : Poco F5 (marble) SM7475"
+          echo "  Root     : ${{ inputs.root_solution }}"
+          echo "  TCP      : ${{ inputs.tcp_congestion }}"
+          echo "  SusFS    : ${{ inputs.enable_susfs }}"
+          echo "  Gaming   : ${{ inputs.enable_gaming_tweaks }}"
+          echo "  OC       : ${{ inputs.enable_overclock }}"
+          echo "  UV       : ${{ inputs.enable_undervolt }}"
+          echo "  Battery  : ${{ inputs.enable_battery_tweaks }}"
+          echo "  Date     : ${{ env.BUILD_DATE }}"
+          if [ -f "${{ env.ZIP_NAME }}" ]; then
+            echo "  ZIP      : ${{ env.ZIP_NAME }} ($(ls -lh '${{ env.ZIP_NAME }}' | awk '{print $5}'))"
+            echo "  Status   : ✅ SUKSES"
+          else
+            echo "  Status   : ❌ GAGAL"
+          fi
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           
