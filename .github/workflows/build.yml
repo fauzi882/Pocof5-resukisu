@@ -83,7 +83,7 @@ jobs:
         run: |
           git clone --depth=1 -b "${{ env.SUSFS_BRANCH }}" "${{ env.SUSFS_REPO }}" susfs4ksu
 
-      - name: Integrasi Root (KernelSU Next atau BakaSU) + Bypass SuSFS Compat Blocker
+      - name: Integrasi Root (KernelSU Next atau BakaSU) + SuSFS + Fix Simbol Linker
         run: |
           cd kernel
 
@@ -132,23 +132,47 @@ jobs:
               fi
             fi
 
-            # === FIX UTAMA: BYPASS BAKASU susfs_compat.mk BLOCKER & SELINUX_HIDE CHECK ===
+            # Netralisir $(error ...) di dalam susfs_compat.mk milik BakaSU
             if [ "$SUSFS_OK" = "true" ]; then
-              echo ">>> Menambal susfs_compat.mk di BakaSU / KernelSU agar tidak melakukan hard-stop..."
-              # 1. Ubah semua $(error ...) di dalam KernelSU/kernel/tools/susfs_compat.mk menjadi $(warning ...)
               find KernelSU drivers/kernelsu -name "*.mk" -o -name "Makefile" -o -name "Kbuild" 2>/dev/null | while read -r mkfile; do
                 sed -i 's/\$(error /\$(warning /g' "$mkfile" || true
               done
-
-              # 2. Bersihkan manual hook selinux_hide di security/selinux/hooks.c jika BakaSU v4.2.0+ menolaknya
-              if grep -rn "selinux_hide" KernelSU/kernel/tools/ 2>/dev/null; then
-                echo ">>> Menyesuaikan hook selinux_hide dengan standar BakaSU v4.2.0+..."
-                # Hapus blok hook manual selinux_hide di security/selinux/hooks.c yang memicu blokir BakaSU
-                sed -i '/#ifdef CONFIG_KSU_SUSFS/,/#endif/ { /ksu_handle_selinux/d; /susfs_is_current_ksu_domain/d; }' security/selinux/hooks.c 2>/dev/null || true
-              fi
             fi
           fi
           echo "SUSFS_APPLIED=$SUSFS_OK" >> $GITHUB_ENV
+
+          # =========================================================================
+          # FIX 5 UNDEFINED SYMBOLS BAWAAN PZQQT PADA SAAT LINKING VMLINUX (ld.lld)
+          # =========================================================================
+          echo ">>> Memperbaiki simbol hook legacy Pzqqt di fs/exec.c & security/selinux/..."
+
+          # 1. Di fs/exec.c: tambahkan definisi __weak untuk ksu_setup_preinit_file & ksu_preinit_handle_post_execveat
+          if grep -q "ksu_preinit_handle_post_execveat\|ksu_setup_preinit_file" fs/exec.c; then
+            cat << 'EOF' >> fs/exec.c
+
+          /* Fallback stubs untuk hook legacy Pzqqt agar kompatibel dengan BakaSU & KSU-Next */
+          __attribute__((weak)) void ksu_setup_preinit_file(const char __user *filename_user) {}
+          __attribute__((weak)) void ksu_preinit_handle_post_execveat(int fd, struct filename **filename_ptr, void *argv, void *envp, int *flags) {}
+          EOF
+          fi
+
+          # 2. Di security/selinux/hooks.c: arahkan balik handle_selinux_setprocattr ke selinux_setprocattr asli atau sediakan __weak stub
+          if grep -q "my_setprocattr" security/selinux/hooks.c; then
+            sed -i 's/return my_setprocattr(/return selinux_setprocattr(/g' security/selinux/hooks.c || true
+            cat << 'EOF' >> security/selinux/hooks.c
+          __attribute__((weak)) int my_setprocattr(const char *name, void *value, size_t size) { return -EINVAL; }
+          EOF
+          fi
+
+          # 3. Di security/selinux/selinuxfs.c: arahkan balik my_write_context & my_write_access ke fungsi asli sel_write_* + __weak stub
+          if grep -q "my_write_context\|my_write_access" security/selinux/selinuxfs.c; then
+            sed -i 's/return my_write_context(/return sel_write_context(/g' security/selinux/selinuxfs.c || true
+            sed -i 's/return my_write_access(/return sel_write_access(/g' security/selinux/selinuxfs.c || true
+            cat << 'EOF' >> security/selinux/selinuxfs.c
+          __attribute__((weak)) ssize_t my_write_context(struct file *file, char *buf, size_t size) { return -EINVAL; }
+          __attribute__((weak)) ssize_t my_write_access(struct file *file, char *buf, size_t size) { return -EINVAL; }
+          EOF
+          fi
 
       - name: Patch Source BBR Plus, Sinyal Modem, GPS & Defconfig
         run: |
@@ -287,7 +311,7 @@ jobs:
             echo "================================================================"
             echo ">>> RINGKASAN AKAR ERROR KOMPILASI (TERTANGKAP DARI LOG):"
             echo "================================================================"
-            grep -E "error:|fatal error:|undefined reference|FAILED|\*\*\*.*Stop" build_full.log | tail -n 50 || true
+            grep -E "error:|fatal error:|undefined reference|undefined symbol|FAILED|\*\*\*.*Stop" build_full.log | tail -n 50 || true
             echo "================================================================"
             exit $BUILD_STATUS
           fi
