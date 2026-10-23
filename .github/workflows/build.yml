@@ -142,36 +142,26 @@ jobs:
           echo "SUSFS_APPLIED=$SUSFS_OK" >> $GITHUB_ENV
 
           # =========================================================================
-          # FIX 5 UNDEFINED SYMBOLS BAWAAN PZQQT PADA SAAT LINKING VMLINUX (ld.lld)
+          # FIX BERSIH 5 SIMBOL HOOK LEGACY PZQQT TANPA CONFLICTING TYPES
           # =========================================================================
-          echo ">>> Memperbaiki simbol hook legacy Pzqqt di fs/exec.c & security/selinux/..."
+          echo ">>> Membersihkan panggilan hook legacy Pzqqt di fs/exec.c & security/selinux/..."
 
-          # 1. Di fs/exec.c: tambahkan definisi __weak untuk ksu_setup_preinit_file & ksu_preinit_handle_post_execveat
-          if grep -q "ksu_preinit_handle_post_execveat\|ksu_setup_preinit_file" fs/exec.c; then
-            cat << 'EOF' >> fs/exec.c
+          # 1. Di fs/exec.c: hapus baris deklarasi & pemanggilan ksu_setup_preinit_file serta ksu_preinit_handle_post_execveat
+          sed -i '/ksu_setup_preinit_file/d' fs/exec.c || true
+          sed -i '/ksu_preinit_handle_post_execveat/d' fs/exec.c || true
 
-          /* Fallback stubs untuk hook legacy Pzqqt agar kompatibel dengan BakaSU & KSU-Next */
-          __attribute__((weak)) void ksu_setup_preinit_file(const char __user *filename_user) {}
-          __attribute__((weak)) void ksu_preinit_handle_post_execveat(int fd, struct filename **filename_ptr, void *argv, void *envp, int *flags) {}
-          EOF
-          fi
-
-          # 2. Di security/selinux/hooks.c: arahkan balik handle_selinux_setprocattr ke selinux_setprocattr asli atau sediakan __weak stub
+          # 2. Di security/selinux/hooks.c: arahkan balik my_setprocattr ke fungsi standar selinux_setprocattr
           if grep -q "my_setprocattr" security/selinux/hooks.c; then
             sed -i 's/return my_setprocattr(/return selinux_setprocattr(/g' security/selinux/hooks.c || true
-            cat << 'EOF' >> security/selinux/hooks.c
-          __attribute__((weak)) int my_setprocattr(const char *name, void *value, size_t size) { return -EINVAL; }
-          EOF
+            sed -i '/extern.*my_setprocattr/d' security/selinux/hooks.c || true
           fi
 
-          # 3. Di security/selinux/selinuxfs.c: arahkan balik my_write_context & my_write_access ke fungsi asli sel_write_* + __weak stub
+          # 3. Di security/selinux/selinuxfs.c: arahkan balik my_write_context & my_write_access ke sel_write_* standar
           if grep -q "my_write_context\|my_write_access" security/selinux/selinuxfs.c; then
             sed -i 's/return my_write_context(/return sel_write_context(/g' security/selinux/selinuxfs.c || true
             sed -i 's/return my_write_access(/return sel_write_access(/g' security/selinux/selinuxfs.c || true
-            cat << 'EOF' >> security/selinux/selinuxfs.c
-          __attribute__((weak)) ssize_t my_write_context(struct file *file, char *buf, size_t size) { return -EINVAL; }
-          __attribute__((weak)) ssize_t my_write_access(struct file *file, char *buf, size_t size) { return -EINVAL; }
-          EOF
+            sed -i '/extern.*my_write_context/d' security/selinux/selinuxfs.c || true
+            sed -i '/extern.*my_write_access/d' security/selinux/selinuxfs.c || true
           fi
 
       - name: Patch Source BBR Plus, Sinyal Modem, GPS & Defconfig
