@@ -1,4 +1,4 @@
-name: Build Marble Kernel (KSU-Next / BakaSU + SuSFS)
+name: Build Marble Kernel (Stable No-OC + KSU-Next / BakaSU + SuSFS)
 
 on:
   workflow_dispatch:
@@ -17,13 +17,13 @@ on:
         default: true
         type: boolean
       tcp_profile:
-        description: 'Profil Algoritma TCP Congestion'
+        description: 'Optimasi Latensi BBR (Aman Tanpa Ubah Struktur ABI)'
         required: true
         default: 'bbr_plus_tuned'
         type: choice
         options:
           - bbr_plus_tuned
-          - bbr_standard
+          - bbr_stock
       kernel_branch:
         description: 'Branch Source Kernel Pzqqt'
         required: true
@@ -35,7 +35,8 @@ on:
 
 env:
   KERNEL_REPO: "https://github.com/Pzqqt/android_kernel_xiaomi_marble.git"
-  AK3_REPO: "https://github.com/osm0sis/AnyKernel3.git"
+  AK3_MARBLE_REPO: "https://github.com/Pzqqt/AnyKernel3.git"
+  AK3_FALLBACK_REPO: "https://github.com/osm0sis/AnyKernel3.git"
   SUSFS_REPO: "https://gitlab.com/simonpunk/susfs4ksu.git"
   SUSFS_BRANCH: "gki-android12-5.10"
   CLANG_URL: "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r536225.tar.gz"
@@ -73,7 +74,7 @@ jobs:
 
       - name: Clone Source Kernel Pzqqt (Marble)
         run: |
-          git clone --depth=1 -b "${{ github.event.inputs.kernel_branch }}" "${{ env.KERNEL_REPO }}" kernel
+          git clone --depth=50 -b "${{ github.event.inputs.kernel_branch }}" "${{ env.KERNEL_REPO }}" kernel
           cd kernel
           git config user.name "kanha-builder"
           git config user.email "builder@localhost"
@@ -83,17 +84,22 @@ jobs:
         run: |
           git clone --depth=1 -b "${{ env.SUSFS_BRANCH }}" "${{ env.SUSFS_REPO }}" susfs4ksu
 
-      - name: Integrasi Root (KernelSU Next atau BakaSU) + SuSFS + Auto-Stub Generator
+      - name: Revert Hook KSU Custom Pzqqt & Integrasi BakaSU / KSU-Next + SuSFS
         run: |
           cd kernel
 
-          # Bersihkan KSU bawaan dari tree kernel agar tidak bentrok
+          # 1. Jika di log commit Pzqqt ada commit "KernelSU" bawaan yang memodifikasi fs/exec.c & selinux,
+          #    kita revert commit hook spesifik tersebut agar fs/exec.c & selinux kembali 100% standar GKI!
+          for commit_hash in $(git log --grep="KernelSU\|ksu\|KSU" --format="%H" -n 10); do
+            git revert --no-commit "$commit_hash" 2>/dev/null || git revert --abort 2>/dev/null || true
+          done
+
+          # Pastikan direktori KernelSU lama bersih
           rm -rf KernelSU drivers/kernelsu
           sed -i '/kernelsu/d' drivers/Makefile || true
           sed -i '/kernelsu/d' drivers/Kconfig || true
 
-          git add -A && git commit -m "clean-pre-root" || true
-
+          # 2. Pasang Root pilihan (BakaSU atau KernelSU Next)
           if [ "${{ github.event.inputs.root_variant }}" = "bakasu" ]; then
             echo ">>> Mengintegrasikan BakaSU (ReSukiSU)..."
             curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash -s main || \
@@ -108,10 +114,9 @@ jobs:
             fi
           fi
 
-          # Terapkan patch SuSFS ke Kernel
+          # 3. Terapkan patch SuSFS
           SUSFS_OK="false"
           if [ "${{ github.event.inputs.enable_susfs }}" = "true" ] && [ -d "../susfs4ksu" ]; then
-            echo ">>> Menyalin header & source SuSFS..."
             cp -r ../susfs4ksu/kernel_patches/fs/* fs/
             cp -r ../susfs4ksu/kernel_patches/include/linux/* include/linux/
 
@@ -120,19 +125,15 @@ jobs:
               if patch -p1 --dry-run --fuzz=3 < "$PATCH_FILE" >/dev/null 2>&1; then
                 patch -p1 --forward --fuzz=3 < "$PATCH_FILE"
                 SUSFS_OK="true"
-                echo ">>> Patch SuSFS 50_add_susfs berhasil diterapkan 100%!"
               elif git apply --3way --check "$PATCH_FILE" >/dev/null 2>&1; then
                 git apply --3way "$PATCH_FILE"
                 SUSFS_OK="true"
-                echo ">>> Patch SuSFS diterapkan via git 3-way merge!"
               else
-                echo ">>> Konflik pada 50_add_susfs, membersihkan sisa file SuSFS..."
                 rm -f fs/susfs.c fs/sus_su.c include/linux/susfs*.h
                 SUSFS_OK="false"
               fi
             fi
 
-            # Netralisir $(error ...) di dalam susfs_compat.mk milik BakaSU
             if [ "$SUSFS_OK" = "true" ]; then
               find KernelSU drivers/kernelsu -name "*.mk" -o -name "Makefile" -o -name "Kbuild" 2>/dev/null | while read -r mkfile; do
                 sed -i 's/\$(error /\$(warning /g' "$mkfile" || true
@@ -141,38 +142,32 @@ jobs:
           fi
           echo "SUSFS_APPLIED=$SUSFS_OK" >> $GITHUB_ENV
 
-          # =========================================================================
-          # AUTO-GENERATOR STUB 1:1 DARI PROTOTYPE ASLI PZQQT (ANTI SYNTAX/TYPE ERROR)
-          # =========================================================================
+          # 4. Pengaman Fallback: Jika revert commit di atas tidak menghapus hook legacy Pzqqt,
+          #    pasang jembatan aman yang memanggil fungsi SELinux asli beserta semua argumennya
           python3 - << 'PYEOF'
           import re
 
-          # 1. Baca prototype extern ksu_setup_preinit_file & ksu_preinit_handle_post_execveat langsung dari fs/exec.c
           with open("fs/exec.c", "r", encoding="utf-8", errors="ignore") as f:
               exec_content = f.read()
 
           stubs = []
           for fn in ["ksu_setup_preinit_file", "ksu_preinit_handle_post_execveat"]:
-              # Tangkap deklarasi extern ... fn(...); meskipun terpotong beberapa baris (multiline)
               pattern = r"extern\s+([^;]*?\b" + fn + r"\s*\([^;]*?\))\s*;"
               m = re.search(pattern, exec_content, re.DOTALL)
               if m:
                   decl = m.group(1).strip()
-                  # Cek apakah return type-nya void atau bukan
                   ret_part = decl.split(fn)[0].strip()
                   if "void" in ret_part and "*" not in ret_part:
                       stubs.append(f"__attribute__((weak)) {decl} {{}}\n")
                   else:
                       stubs.append(f"__attribute__((weak)) {decl} {{ return 0; }}\n")
-                  print(f"[OK] Berhasil menyalin signature asli untuk {fn}: {decl}")
 
           if stubs:
               with open("fs/exec.c", "a", encoding="utf-8") as f:
-                  f.write("\n/* Auto-generated exact signature weak stubs */\n")
+                  f.write("\n/* Safe no-op weak stubs */\n")
                   for s in stubs:
                       f.write(s)
 
-          # 2. Perbaiki wrapper SELinux di security/selinux/hooks.c & selinuxfs.c dengan aman
           for filepath, replacements in [
               ("security/selinux/hooks.c", [("my_setprocattr", "selinux_setprocattr")]),
               ("security/selinux/selinuxfs.c", [("my_write_context", "sel_write_context"), ("my_write_access", "sel_write_access")])
@@ -183,86 +178,47 @@ jobs:
                   content = content.replace(f"return {old_fn}(", f"return {orig_fn}(")
               with open(filepath, "w", encoding="utf-8") as f:
                   f.write(content)
-              print(f"[OK] Wrapper SELinux di {filepath} berhasil diarahkan ke fungsi asli.")
           PYEOF
 
-      - name: Patch Source BBR Plus, Sinyal Modem, GPS & Defconfig
+      - name: Konfigurasi Defconfig Minimal & Aman (Anti-Bootloop / ABI Safe)
         run: |
           cd kernel
 
-          # 1. Optimasi konstanta TCP BBR Plus pada net/ipv4/tcp_bbr.c
+          # Tuning ringan konstanta internal BBR (Tidak mengubah ABI atau struct kernel sama sekali)
           if [ "${{ github.event.inputs.tcp_profile }}" = "bbr_plus_tuned" ] && [ -f "net/ipv4/tcp_bbr.c" ]; then
-            echo ">>> Menyetel konstanta TCP BBR ke profil BBR Plus..."
             sed -i 's/static const u32 bbr_min_rtt_win_sec = 10;/static const u32 bbr_min_rtt_win_sec = 5;/g' net/ipv4/tcp_bbr.c || true
             sed -i 's/static const u32 bbr_probe_rtt_mode_ms = 200;/static const u32 bbr_probe_rtt_mode_ms = 100;/g' net/ipv4/tcp_bbr.c || true
           fi
 
-          # 2. Deteksi Defconfig Marble di repo Pzqqt
+          # Gunakan defconfig bawaan Pzqqt TANPA mengubah HZ, Scheduler, atau Memory Layout
           if [ -f "arch/arm64/configs/marble_defconfig" ]; then
             DEFCONFIG_NAME="marble_defconfig"
             DEFCONFIG_FILE="arch/arm64/configs/marble_defconfig"
           elif [ -f "arch/arm64/configs/vendor/marble_defconfig" ]; then
             DEFCONFIG_NAME="vendor/marble_defconfig"
             DEFCONFIG_FILE="arch/arm64/configs/vendor/marble_defconfig"
-          elif [ -f "arch/arm64/configs/vendor/marble_GKI.config" ]; then
-            DEFCONFIG_NAME="gki_defconfig"
-            DEFCONFIG_FILE="arch/arm64/configs/vendor/marble_GKI.config"
           else
             DEFCONFIG_NAME="gki_defconfig"
             DEFCONFIG_FILE="arch/arm64/configs/gki_defconfig"
           fi
 
           echo "TARGET_DEFCONFIG=$DEFCONFIG_NAME" >> $GITHUB_ENV
-          echo ">>> Menggunakan Defconfig: $DEFCONFIG_FILE"
+          echo ">>> Menggunakan Defconfig Asli: $DEFCONFIG_FILE"
 
+          # HANYA tambahkan config KSU, SuSFS, dan BBR (Tanpa Overclock / Tanpa Ubah HZ)
           cat << 'EOF' >> "$DEFCONFIG_FILE"
-
-          # === MATIKAN WERROR AGAR TIDAK GAGAL KARENA WARNING COMPILER ===
           CONFIG_WERROR=n
-          CONFIG_FRAME_WARN=4096
-
-          # === ROOT (KSU-NEXT / BAKASU) ===
           CONFIG_KSU=y
           CONFIG_KPROBES=y
           CONFIG_HAVE_KPROBES=y
           CONFIG_KPROBE_EVENTS=y
-
-          # === TCP BBR & SINYAL MODEM KUAT ===
           CONFIG_TCP_CONG_ADVANCED=y
           CONFIG_TCP_CONG_BBR=y
           CONFIG_DEFAULT_BBR=y
           CONFIG_DEFAULT_TCP_CONG="bbr"
           CONFIG_NET_SCH_FQ=y
-          CONFIG_NET_SCH_FQ_CODEL=y
-          CONFIG_DEFAULT_FQ=y
-          CONFIG_INET_UDP_DIAG=y
-          CONFIG_INET_RAW_DIAG=y
-          CONFIG_INET_DIAG_DESTROY=y
-
-          # === GPS / GNSS PRECISION & TIMING ===
-          CONFIG_HIGH_RES_TIMERS=y
-          CONFIG_PPS=y
-          CONFIG_PTP_1588_CLOCK=y
-
-          # === GAMING FPS & EFISIENSI BATERAI ===
-          CONFIG_HZ_300=y
-          CONFIG_HZ=300
-          CONFIG_NO_HZ_IDLE=y
-          CONFIG_UCLAMP_TASK=y
-          CONFIG_UCLAMP_TASK_GROUP=y
-          CONFIG_SCHED_MC=y
-          CONFIG_ENERGY_MODEL=y
-          CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y
-          CONFIG_WQ_POWER_EFFICIENT_DEFAULT=y
-          CONFIG_LRU_GEN=y
-          CONFIG_LRU_GEN_ENABLED=y
-          CONFIG_ZRAM=y
-          CONFIG_CRYPTO_LZ4=y
-          CONFIG_CRYPTO_ZSTD=y
-          CONFIG_LTO_CLANG_THIN=y
           EOF
 
-          # Aktifkan flag SuSFS jika patch berhasil diterapkan
           if [ "${{ env.SUSFS_APPLIED }}" = "true" ]; then
             cat << 'EOF' >> "$DEFCONFIG_FILE"
           CONFIG_KSU_SUSFS=y
@@ -284,11 +240,11 @@ jobs:
             echo "CONFIG_KSU_SUSFS=n" >> "$DEFCONFIG_FILE"
           fi
 
-      - name: Kompilasi Kernel Marble
+      - name: Kompilasi Kernel Marble (Flag Standar GKI Tanpa Overclock)
         run: |
           cd kernel
-          export KBUILD_BUILD_USER="kanha"
-          export KBUILD_BUILD_HOST="marble-forge"
+          export KBUILD_BUILD_USER="melt"
+          export KBUILD_BUILD_HOST="poco-f5"
 
           make O=out ARCH=arm64 \
             CC="ccache clang" \
@@ -300,11 +256,10 @@ jobs:
             ./scripts/kconfig/merge_config.sh -m -O out out/.config arch/arm64/configs/vendor/marble_GKI.config
           fi
 
-          # Paksa nonaktifkan WERROR & SUS_SU di dalam out/.config
           ./scripts/config --file out/.config -d WERROR -d CONFIG_WERROR -d KSU_SUSFS_SUS_SU --set-val FRAME_WARN 4096
           make O=out ARCH=arm64 CC="ccache clang" LLVM=1 LLVM_IAS=1 olddefconfig
 
-          # Kompilasi Image & simpan log lengkap
+          # Kompilasi Murni Standar GKI (Tanpa -O3 atau -march custom yang bisa bikin panic)
           set +e
           make -j$(nproc --all) \
             O=out \
@@ -314,95 +269,98 @@ jobs:
             LLVM_IAS=1 \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
-            KCFLAGS="-O2 -Wno-error -Wno-unused-variable -Wno-unused-function -Wno-frame-larger-than -Wno-implicit-function-declaration" \
+            KCFLAGS="-Wno-error" \
             Image Image.gz 2>&1 | tee build_full.log
           BUILD_STATUS=${PIPESTATUS[0]}
           set -e
 
           if [ $BUILD_STATUS -ne 0 ]; then
-            echo "================================================================"
-            echo ">>> RINGKASAN AKAR ERROR KOMPILASI (TERTANGKAP DARI LOG):"
-            echo "================================================================"
             grep -E "error:|fatal error:|undefined reference|undefined symbol|FAILED|\*\*\*.*Stop" build_full.log | tail -n 50 || true
-            echo "================================================================"
             exit $BUILD_STATUS
           fi
 
-      - name: Paketkan ke AnyKernel3 dengan Modul Tuning Sinyal, GPS & Gaming
+      - name: Paketkan ke AnyKernel3 Khusus Marble (Anti-Bootloop)
         run: |
-          git clone --depth=1 "${{ env.AK3_REPO }}" AnyKernel3
+          # Gunakan repo AnyKernel3 khusus Marble milik Pzqqt (fallback ke osm0sis dengan konfigurasi GKI murni)
+          if git clone --depth=1 "${{ env.AK3_MARBLE_REPO }}" AnyKernel3 2>/dev/null; then
+            echo ">>> Menggunakan AnyKernel3 resmi Pzqqt untuk Marble..."
+          else
+            git clone --depth=1 "${{ env.AK3_FALLBACK_REPO }}" AnyKernel3
+            cd AnyKernel3
+            cat << 'EOF' > anykernel.sh
+          ### AnyKernel3 Ramdisk Mod Script for POCO F5 (marble) GKI 2.0
+          properties() { '
+          kernel.string=Melt Kernel POCO F5 (marble)
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=marble
+          device.name2=marblein
+          device.name3=POCO F5
+          device.name4=Redmi Note 12 Turbo
+          supported.versions=12-16
+          supported.patchlevels=
+          '; }
+
+          block=/dev/block/bootdevice/by-name/boot;
+          is_slot_device=1;
+          ramdisk_compression=auto;
+          patch_vbmeta_flag=auto;
+
+          . tools/ak3-core.sh;
+
+          split_boot;
+          flash_boot;
+          EOF
+            cd ..
+          fi
+
           cd AnyKernel3
           rm -rf .git README.md
 
-          sed -i 's/device.name1=.*/device.name1=marble/' anykernel.sh
-          sed -i 's/device.name2=.*/device.name2=marblein/' anykernel.sh
-          sed -i 's/device.name3=.*/device.name3=Redmi Note 12 Turbo/' anykernel.sh
-          sed -i 's/device.name4=.*/device.name4=POCO F5/' anykernel.sh
-          sed -i 's/BLOCK=.*/BLOCK=auto;/' anykernel.sh
-          sed -i 's/IS_SLOT_DEVICE=.*/IS_SLOT_DEVICE=1;/' anykernel.sh
-
-          if [ -f "../kernel/out/arch/arm64/boot/Image.gz" ]; then
+          # Pastikan menyalin format Image yang tepat (GKI 2.0 Marble memakai Image atau Image.gz)
+          if grep -q "Image.gz" anykernel.sh 2>/dev/null && [ -f "../kernel/out/arch/arm64/boot/Image.gz" ]; then
             cp ../kernel/out/arch/arm64/boot/Image.gz .
-          else
+          elif [ -f "../kernel/out/arch/arm64/boot/Image" ]; then
             cp ../kernel/out/arch/arm64/boot/Image .
+            [ -f "../kernel/out/arch/arm64/boot/Image.gz" ] && cp ../kernel/out/arch/arm64/boot/Image.gz .
           fi
 
-          cat << 'EOF' > ak3_marble_tune.sh
+          # Sertakan skrip userspace tuning (Aman 100%, berjalan SETELAH HP selesai nyala)
+          cat << 'EOF' > marble_postboot_tune.sh
           #!/system/bin/sh
           while [ "$(getprop sys.boot_completed)" != "1" ]; do
-            sleep 2
+            sleep 3
           done
 
-          # 1. Aktivasi BBR + Fair Queueing (FQ)
+          # 1. BBR + FQ Network Latency Tune
           echo "bbr" > /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null
           echo "fq" > /proc/sys/net/core/default_qdisc 2>/dev/null
-          echo 3 > /proc/sys/net/ipv4/tcp_fastopen 2>/dev/null
-          echo 1 > /proc/sys/net/ipv4/tcp_ecn 2>/dev/null
           echo 0 > /proc/sys/net/ipv4/tcp_slow_start_after_idle 2>/dev/null
 
-          # 2. Penguatan Sinyal Provider (RMNET Buffer & Modem Power Save Control)
-          echo "4096,87380,16777216" > /proc/sys/net/ipv4/tcp_rmem 2>/dev/null
-          echo "4096,65536,16777216" > /proc/sys/net/ipv4/tcp_wmem 2>/dev/null
-          echo 16777216 > /proc/sys/net/core/rmem_max 2>/dev/null
-          echo 16777216 > /proc/sys/net/core/wmem_max 2>/dev/null
-          echo 5000 > /proc/sys/net/core/netdev_max_backlog 2>/dev/null
+          # 2. Penguat Sinyal & Stabilitas Modem
           resetprop -n persist.vendor.radio.add_power_save 0
-          resetprop -n persist.vendor.radio.apm_sim_not_pwdn 1
           resetprop -n persist.vendor.radio.sib16_support 1
-          resetprop -n persist.vendor.radio.rat_on combine
 
-          # 3. Penguatan Akurasi GPS / GNSS Dual-Band L1+L5 & A-GPS Cepat
-          resetprop -n persist.vendor.overlay.izat.optin rro
-          resetprop -n persist.backup.ntpServer "0.id.pool.ntp.org"
-          for dev in /sys/devices/platform/soc/*.qcom,glink/*; do
-            [ -e "$dev/power/control" ] && echo "on" > "$dev/power/control" 2>/dev/null
-          done
-
-          # 4. Keseimbangan Performa FPS Gaming & Efisiensi Baterai (UClamp & Schedutil)
-          echo 1 > /dev/cpuctl/top-app/cpu.uclamp.latency_sensitive 2>/dev/null
-          echo 15 > /dev/cpuctl/top-app/cpu.uclamp.min 2>/dev/null
-          echo 0 > /dev/cpuctl/background/cpu.uclamp.max 2>/dev/null
+          # 3. Efisiensi Baterai & Responsivitas Schedutil Standar
           for gov in /sys/devices/system/cpu/cpufreq/policy*; do
-            echo "schedutil" > "$gov/scaling_governor" 2>/dev/null
-            echo 500 > "$gov/schedutil/up_rate_limit_us" 2>/dev/null
-            echo 10000 > "$gov/schedutil/down_rate_limit_us" 2>/dev/null
+            echo 1000 > "$gov/schedutil/up_rate_limit_us" 2>/dev/null
+            echo 5000 > "$gov/schedutil/down_rate_limit_us" 2>/dev/null
           done
-
-          # 5. Aktifkan Multi-Gen LRU (MGLRU)
-          echo "0x0007" > /sys/kernel/mm/lru_gen/enabled 2>/dev/null
-          echo 1000 > /sys/kernel/mm/lru_gen/min_ttl_ms 2>/dev/null
           EOF
-          chmod 0755 ak3_marble_tune.sh
+          chmod 0755 marble_postboot_tune.sh
 
           BUILD_DATE=$(date +"%Y%m%d-%H%M")
-          ZIP_NAME="Melt-Marble-${{ github.event.inputs.root_variant }}-SuSFS_${{ env.SUSFS_APPLIED }}-${BUILD_DATE}.zip"
+          ZIP_NAME="Melt-Marble-Stable-${{ github.event.inputs.root_variant }}-SuSFS_${{ env.SUSFS_APPLIED }}-${BUILD_DATE}.zip"
           zip -r9 "../${ZIP_NAME}" * -x "*.git*"
           echo "ZIP_OUTPUT=${ZIP_NAME}" >> $GITHUB_ENV
 
       - name: Upload Artifact Flashable Kernel ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: Melt-Kernel-Marble-${{ github.event.inputs.root_variant }}
+          name: Melt-Kernel-Marble-Stable-${{ github.event.inputs.root_variant }}
           path: ${{ env.ZIP_OUTPUT }}
           retention-days: 14
           
