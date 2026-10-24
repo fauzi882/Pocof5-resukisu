@@ -1,4 +1,4 @@
-name: Build Marble Kernel (Stub Linker Fix + Full Security + SuSFS)
+name: Build Marble Kernel (Pzqqt Hook Purge + Full Security + SuSFS)
 
 on:
   workflow_dispatch:
@@ -86,12 +86,12 @@ jobs:
           git config user.name "build-user"
           git config user.email "build-user@android"
 
-      - name: Siapkan Repo SuSFS (gki-android12-5.10)
+      - name: Siapkan Repo SuSFS
         if: ${{ github.event.inputs.enable_susfs == 'true' }}
         run: |
-          git clone --depth=1 -b "${{ SUSFS_BRANCH }}" "${{ env.SUSFS_REPO }}" susfs4ksu
+          git clone --depth=1 -b "${{ env.SUSFS_BRANCH }}" "${{ env.SUSFS_REPO }}" susfs4ksu
 
-      - name: Integrasi Root + SuSFS + Inject Stub Linker C Murni
+      - name: Integrasi Root + SuSFS + Purge Total Hook Pzqqt
         run: |
           cd kernel
 
@@ -144,26 +144,45 @@ jobs:
           echo "SUSFS_APPLIED=$SUSFS_OK" >> $GITHUB_ENV
 
           # =========================================================================
-          # BIKIN FILE STUB C UNTUK MENGATASI 5 UNDEFINED SYMBOL SECARA PERMANEN
+          # PYTHON PURGE: KOMENTARI/HAPUS PEMANGGILAN FUNGSI LEGACY PZQQT DI KODE SUMBER
           # =========================================================================
-          echo ">>> Membuat file ksu_compat_stubs.c untuk melenyapkan error ld.lld..."
-          cat << 'EOF' > fs/ksu_compat_stubs.c
-          #include <linux/module.h>
-          #include <linux/kernel.h>
-          #include <linux/fs.h>
+          python3 - << 'PYEOF'
+          import re
 
-          /* Stub untuk fungsi preinit execveat Pzqqt */
-          void ksu_setup_preinit_file(const void *arg) {}
-          void ksu_preinit_handle_post_execveat(int fd, void *filename, void *argv, void *envp, int *flags) {}
+          # 1. Bersihkan fs/exec.c dari ksu_setup_preinit_file & ksu_preinit_handle_post_execveat
+          with open("fs/exec.c", "r", encoding="utf-8", errors="ignore") as f:
+              code = f.read()
 
-          /* Stub untuk fungsi SELinux hooks & selinuxfs Pzqqt */
-          int my_setprocattr(const char *name, void *value, size_t size) { return -EINVAL; }
-          ssize_t my_write_context(struct file *file, const char __user *buf, size_t size, loff_t *ppos) { return -EINVAL; }
-          ssize_t my_write_access(struct file *file, const char __user *buf, size_t size, loff_t *ppos) { return -EINVAL; }
-          EOF
+          # Komentari baris yang memanggil fungsi preinit tersebut
+          code = re.sub(r"(^\s*ksu_setup_preinit_file\s*\(.*?\);\s*$)", r"/* \1 */", code, flags=re.MULTILINE)
+          code = re.sub(r"(^\s*ksu_preinit_handle_post_execveat\s*\(.*?\);\s*$)", r"/* \1 */", code, flags=re.MULTILINE)
+          code = re.sub(r"(extern\s+void\s+ksu_setup_preinit_file.*?;\s*)", r"/* \1 */", code, flags=re.DOTALL)
+          code = re.sub(r"(extern\s+void\s+ksu_preinit_handle_post_execveat.*?;\s*)", r"/* \1 */", code, flags=re.DOTALL)
 
-          # Daftarkan file stub ke fs/Makefile agar ikut terkompilasi ke vmlinux
-          echo "obj-y += ksu_compat_stubs.o" >> fs/Makefile
+          with open("fs/exec.c", "w", encoding="utf-8") as f:
+              f.write(code)
+          print("[OK] fs/exec.c berhasil dibersihkan dari preinit Pzqqt.")
+
+          # 2. Bersihkan security/selinux/hooks.c dari my_setprocattr
+          with open("security/selinux/hooks.c", "r", encoding="utf-8", errors="ignore") as f:
+              hooks = f.read()
+          hooks = hooks.replace("return my_setprocattr(", "return selinux_setprocattr(")
+          hooks = re.sub(r"extern\s+int\s+my_setprocattr\s*\(.*?\);\s*", "", hooks)
+          with open("security/selinux/hooks.c", "w", encoding="utf-8") as f:
+              f.write(hooks)
+          print("[OK] hooks.c berhasil dinetralkan.")
+
+          # 3. Bersihkan security/selinux/selinuxfs.c dari my_write_context & my_write_access
+          with open("security/selinux/selinuxfs.c", "r", encoding="utf-8", errors="ignore") as f:
+              sfs = f.read()
+          sfs = sfs.replace("return my_write_context(", "return sel_write_context(")
+          sfs = sfs.replace("return my_write_access(", "return sel_write_access(")
+          sfs = re.sub(r"extern\s+ssize_t\s+my_write_context\s*\(.*?\);\s*", "", sfs)
+          sfs = re.sub(r"extern\s+ssize_t\s+my_write_access\s*\(.*?\);\s*", "", sfs)
+          with open("security/selinux/selinuxfs.c", "w", encoding="utf-8") as f:
+              f.write(sfs)
+          print("[OK] selinuxfs.c berhasil dinetralkan.")
+          PYEOF
 
       - name: Konfigurasi Defconfig Full Security & Stealth
         run: |
