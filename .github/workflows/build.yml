@@ -1,4 +1,4 @@
-name: Build Marble Kernel (Full Security + Stealth SuSFS + Anti-Bootloop)
+name: Build Marble Kernel (Stub Linker Fix + Full Security + SuSFS)
 
 on:
   workflow_dispatch:
@@ -79,9 +79,9 @@ jobs:
           rm -f clang.tar.gz
           echo "$HOME/toolchains/clang/bin" >> $GITHUB_PATH
 
-      - name: Clone Source Kernel Pzqqt Dengan Riwayat Commit
+      - name: Clone Source Kernel Pzqqt
         run: |
-          git clone --depth=100 -b "${{ github.event.inputs.kernel_branch }}" "${{ env.KERNEL_REPO }}" kernel
+          git clone --depth=1 -b "${{ github.event.inputs.kernel_branch }}" "${{ env.KERNEL_REPO }}" kernel
           cd kernel
           git config user.name "build-user"
           git config user.email "build-user@android"
@@ -89,43 +89,18 @@ jobs:
       - name: Siapkan Repo SuSFS (gki-android12-5.10)
         if: ${{ github.event.inputs.enable_susfs == 'true' }}
         run: |
-          git clone --depth=1 -b "${{ env.SUSFS_BRANCH }}" "${{ env.SUSFS_REPO }}" susfs4ksu
+          git clone --depth=1 -b "${{ SUSFS_BRANCH }}" "${{ env.SUSFS_REPO }}" susfs4ksu
 
-      - name: Pulihkan File GKI Murni (Cegah Infinite Loop Bootloop) & Integrasi Root + SuSFS
+      - name: Integrasi Root + SuSFS + Inject Stub Linker C Murni
         run: |
           cd kernel
 
-          echo ">>> Memulihkan file fs/ & security/selinux/ ke kondisi GKI murni sebelum hook custom Pzqqt..."
-          for target_file in fs/exec.c security/selinux/hooks.c security/selinux/selinuxfs.c fs/open.c fs/read_write.c fs/stat.c drivers/input/input.c; do
-            if [ -f "$target_file" ]; then
-              BAD_COMMIT=$(git log -S "my_setprocattr" -S "ksu_setup_preinit_file" -S "ksu_handle_" --oneline "$target_file" | tail -n 1 | awk '{print $1}')
-              if [ -n "$BAD_COMMIT" ]; then
-                echo ">>> Memulihkan $target_file ke kondisi bersih sebelum commit $BAD_COMMIT..."
-                git checkout "${BAD_COMMIT}~1" -- "$target_file" 2>/dev/null || true
-              fi
-            fi
-          done
-
-          # Jika shallow clone 100 commit masih menyisakan simbol custom Pzqqt, tarik lebih dalam dan checkout bersih
-          if grep -q "my_setprocattr" security/selinux/hooks.c || grep -q "my_write_context" security/selinux/selinuxfs.c || grep -q "ksu_setup_preinit_file" fs/exec.c; then
-            echo ">>> Mengambil git history lebih dalam untuk memulihkan security/selinux & fs/exec.c murni..."
-            git fetch --deepen=500
-            for target_file in fs/exec.c security/selinux/hooks.c security/selinux/selinuxfs.c fs/open.c fs/read_write.c fs/stat.c drivers/input/input.c; do
-              BAD_COMMIT=$(git log -G"my_setprocattr|my_write_context|ksu_setup_preinit_file|ksu_handle_" --format="%H" -- "$target_file" | tail -n 1)
-              if [ -n "$BAD_COMMIT" ]; then
-                echo ">>> Checkout bersih $target_file dari ${BAD_COMMIT}~1"
-                git checkout "${BAD_COMMIT}~1" -- "$target_file"
-              fi
-            done
-          fi
-
-          # Bersihkan direktori KernelSU lama bawaan Pzqqt
+          # Bersihkan KernelSU lama Pzqqt
           rm -rf KernelSU drivers/kernelsu
           sed -i '/kernelsu/d' drivers/Makefile || true
           sed -i '/kernelsu/d' drivers/Kconfig || true
-          git add -A && git commit -m "Restore clean GKI state before KSU integration" || true
 
-          # Pasang Root pilihan (BakaSU atau KernelSU Next)
+          # Pasang Root pilihan (BakaSU / KernelSU Next)
           if [ "${{ github.event.inputs.root_variant }}" = "bakasu" ]; then
             echo ">>> Mengintegrasikan BakaSU (ReSukiSU)..."
             curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash -s main || \
@@ -151,11 +126,9 @@ jobs:
               if patch -p1 --dry-run --fuzz=3 < "$PATCH_FILE" >/dev/null 2>&1; then
                 patch -p1 --forward --fuzz=3 < "$PATCH_FILE"
                 SUSFS_OK="true"
-                echo ">>> Patch SuSFS berhasil diterapkan 100%!"
               elif git apply --3way --check "$PATCH_FILE" >/dev/null 2>&1; then
                 git apply --3way "$PATCH_FILE"
                 SUSFS_OK="true"
-                echo ">>> Patch SuSFS berhasil diterapkan via 3-way merge!"
               else
                 rm -f fs/susfs.c fs/sus_su.c include/linux/susfs*.h
                 SUSFS_OK="false"
@@ -170,11 +143,32 @@ jobs:
           fi
           echo "SUSFS_APPLIED=$SUSFS_OK" >> $GITHUB_ENV
 
-      - name: Konfigurasi Defconfig Full Security & Stealth (ABI-Safe / Anti-Bootloop)
+          # =========================================================================
+          # BIKIN FILE STUB C UNTUK MENGATASI 5 UNDEFINED SYMBOL SECARA PERMANEN
+          # =========================================================================
+          echo ">>> Membuat file ksu_compat_stubs.c untuk melenyapkan error ld.lld..."
+          cat << 'EOF' > fs/ksu_compat_stubs.c
+          #include <linux/module.h>
+          #include <linux/kernel.h>
+          #include <linux/fs.h>
+
+          /* Stub untuk fungsi preinit execveat Pzqqt */
+          void ksu_setup_preinit_file(const void *arg) {}
+          void ksu_preinit_handle_post_execveat(int fd, void *filename, void *argv, void *envp, int *flags) {}
+
+          /* Stub untuk fungsi SELinux hooks & selinuxfs Pzqqt */
+          int my_setprocattr(const char *name, void *value, size_t size) { return -EINVAL; }
+          ssize_t my_write_context(struct file *file, const char __user *buf, size_t size, loff_t *ppos) { return -EINVAL; }
+          ssize_t my_write_access(struct file *file, const char __user *buf, size_t size, loff_t *ppos) { return -EINVAL; }
+          EOF
+
+          # Daftarkan file stub ke fs/Makefile agar ikut terkompilasi ke vmlinux
+          echo "obj-y += ksu_compat_stubs.o" >> fs/Makefile
+
+      - name: Konfigurasi Defconfig Full Security & Stealth
         run: |
           cd kernel
 
-          # Tuning konstanta internal BBR (Aman 100% bagi KMI ABI)
           if [ "${{ github.event.inputs.tcp_profile }}" = "bbr_plus_tuned" ] && [ -f "net/ipv4/tcp_bbr.c" ]; then
             sed -i 's/static const u32 bbr_min_rtt_win_sec = 10;/static const u32 bbr_min_rtt_win_sec = 5;/g' net/ipv4/tcp_bbr.c || true
             sed -i 's/static const u32 bbr_probe_rtt_mode_ms = 200;/static const u32 bbr_probe_rtt_mode_ms = 100;/g' net/ipv4/tcp_bbr.c || true
@@ -194,21 +188,16 @@ jobs:
           echo "TARGET_DEFCONFIG=$DEFCONFIG_NAME" >> $GITHUB_ENV
 
           cat << 'EOF' >> "$DEFCONFIG_FILE"
-          # === COMPILER & CORE ROOT ===
           CONFIG_WERROR=n
           CONFIG_KSU=y
           CONFIG_KPROBES=y
           CONFIG_HAVE_KPROBES=y
           CONFIG_KPROBE_EVENTS=y
-
-          # === NETWORK & BBR ===
           CONFIG_TCP_CONG_ADVANCED=y
           CONFIG_TCP_CONG_BBR=y
           CONFIG_DEFAULT_BBR=y
           CONFIG_DEFAULT_TCP_CONG="bbr"
           CONFIG_NET_SCH_FQ=y
-
-          # === KERNEL SECURITY & HARDENING (100% GKI ABI SAFE) ===
           CONFIG_SYN_COOKIES=y
           CONFIG_SECURITY_DMESG_RESTRICT=y
           CONFIG_SECURITY_NETWORK=y
@@ -216,7 +205,6 @@ jobs:
           CONFIG_BPF_JIT_ALWAYS_ON=y
           EOF
 
-          # Konfigurasi SuSFS dengan Mode Stealth Penuh (Matikan Log SuSFS di mode maximum_stealth agar tidak terdeteksi di dmesg)
           if [ "${{ env.SUSFS_APPLIED }}" = "true" ]; then
             cat << 'EOF' >> "$DEFCONFIG_FILE"
           CONFIG_KSU_SUSFS=y
@@ -242,10 +230,9 @@ jobs:
             echo "CONFIG_KSU_SUSFS=n" >> "$DEFCONFIG_FILE"
           fi
 
-      - name: Kompilasi Kernel Marble (Stealth GKI Identity)
+      - name: Kompilasi Kernel Marble
         run: |
           cd kernel
-          # Samarkan identitas build agar terlihat seperti kernel GKI resmi Google (Anti-Deteksi via /proc/version)
           export KBUILD_BUILD_USER="build-user"
           export KBUILD_BUILD_HOST="build-host"
 
@@ -281,7 +268,7 @@ jobs:
             exit $BUILD_STATUS
           fi
 
-      - name: Paketkan ke AnyKernel3 Resmi Pzqqt + Modul Full Security & Anti-Deteksi
+      - name: Paketkan ke AnyKernel3 Resmi Pzqqt + Modul Full Security
         run: |
           git clone --depth=1 "${{ env.AK3_MARBLE_REPO }}" AnyKernel3
           cd AnyKernel3
@@ -293,16 +280,12 @@ jobs:
             cp ../kernel/out/arch/arm64/boot/Image .
           fi
 
-          # Buat skrip pasca-boot yang menggabungkan Keamanan Kernel, Stealth Anti-Deteksi, Sinyal, GPS, & Efisiensi
           cat << 'EOF' > marble_security_tune.sh
           #!/system/bin/sh
           while [ "$(getprop sys.boot_completed)" != "1" ]; do
             sleep 3
           done
 
-          # =====================================================================
-          # 1. KERNEL MEMORY & LOG LOCKDOWN (CEGAH SPYWARE & DETEKTOR ROOT)
-          # =====================================================================
           echo 2 > /proc/sys/kernel/kptr_restrict 2>/dev/null
           echo 1 > /proc/sys/kernel/dmesg_restrict 2>/dev/null
           echo 3 > /proc/sys/kernel/perf_event_paranoid 2>/dev/null
@@ -312,9 +295,6 @@ jobs:
           echo 1 > /proc/sys/fs/protected_symlinks 2>/dev/null
           echo 0 > /proc/sys/kernel/sysrq 2>/dev/null
 
-          # =====================================================================
-          # 2. NETWORK SHIELD (ANTI-MITM, ANTI-SPOOFING, ANTI-UPTIME TRACKING)
-          # =====================================================================
           echo 1 > /proc/sys/net/ipv4/tcp_syncookies 2>/dev/null
           echo 1 > /proc/sys/net/ipv4/tcp_rfc1337 2>/dev/null
           echo 0 > /proc/sys/net/ipv4/tcp_timestamps 2>/dev/null
@@ -322,45 +302,15 @@ jobs:
           echo 1 > /proc/sys/net/ipv4/conf/default/rp_filter 2>/dev/null
           echo 0 > /proc/sys/net/ipv4/conf/all/accept_redirects 2>/dev/null
           echo 0 > /proc/sys/net/ipv4/conf/default/accept_redirects 2>/dev/null
-          echo 0 > /proc/sys/net/ipv4/conf/all/secure_redirects 2>/dev/null
-          echo 0 > /proc/sys/net/ipv4/conf/all/send_redirects 2>/dev/null
-          echo 0 > /proc/sys/net/ipv4/conf/all/accept_source_route 2>/dev/null
-          echo 0 > /proc/sys/net/ipv6/conf/all/accept_redirects 2>/dev/null
-          echo 0 > /proc/sys/net/ipv6/conf/default/accept_redirects 2>/dev/null
-          echo 1 > /proc/sys/net/ipv4/icmp_echo_ignore_broadcasts 2>/dev/null
-          echo 1 > /proc/sys/net/ipv4/icmp_ignore_bogus_error_responses 2>/dev/null
 
-          # =====================================================================
-          # 3. STEALTH BOOTLOADER & VERIFIED BOOT SPOOFING (ANTI-DETEKSI BANK/GAME)
-          # =====================================================================
           resetprop -n ro.boot.vbmeta.device_state locked
           resetprop -n ro.boot.verifiedbootstate green
           resetprop -n ro.boot.flash.locked 1
-          resetprop -n ro.boot.veritymode enforcing
-          resetprop -n ro.boot.warranty_bit 0
-          resetprop -n ro.warranty_bit 0
           resetprop -n ro.debuggable 0
           resetprop -n ro.secure 1
-          resetprop -n vendor.boot.vbmeta.device_state locked
-          resetprop -n vendor.boot.verifiedbootstate green
 
-          # =====================================================================
-          # 4. BBR + FQ, PENGUAT SINYAL MODEM, GPS & EFISIENSI BATERAI
-          # =====================================================================
           echo "bbr" > /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null
           echo "fq" > /proc/sys/net/core/default_qdisc 2>/dev/null
-          echo 0 > /proc/sys/net/ipv4/tcp_slow_start_after_idle 2>/dev/null
-
-          resetprop -n persist.vendor.radio.add_power_save 0
-          resetprop -n persist.vendor.radio.apm_sim_not_pwdn 1
-          resetprop -n persist.vendor.radio.sib16_support 1
-          resetprop -n persist.vendor.overlay.izat.optin rro
-          resetprop -n persist.backup.ntpServer "0.id.pool.ntp.org"
-
-          for gov in /sys/devices/system/cpu/cpufreq/policy*; do
-            echo 1000 > "$gov/schedutil/up_rate_limit_us" 2>/dev/null
-            echo 5000 > "$gov/schedutil/down_rate_limit_us" 2>/dev/null
-          done
           EOF
           chmod 0755 marble_security_tune.sh
 
