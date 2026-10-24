@@ -1,4 +1,4 @@
-name: Build Marble Kernel (100% LTO-Proof + Clean Boot + Full Security)
+name: Build Marble Kernel (Pzqqt Purge + Full Security + SuSFS)
 
 on:
   workflow_dispatch:
@@ -84,7 +84,7 @@ jobs:
 
       - name: Clone Source Kernel Pzqqt
         run: |
-          git clone --filter=blob:none -b "${{ github.event.inputs.kernel_branch }}" "${{ env.KERNEL_REPO }}" kernel
+          git clone --depth=1 -b "${{ github.event.inputs.kernel_branch }}" "${{ env.KERNEL_REPO }}" kernel
           cd kernel
           git config user.name "build-user"
           git config user.email "build-user@android"
@@ -94,33 +94,23 @@ jobs:
         run: |
           git clone --depth=1 -b "${{ env.SUSFS_BRANCH }}" "${{ env.SUSFS_REPO }}" susfs4ksu
 
-      - name: Restore Murni File GKI + Integrasi Root & SuSFS + LTO-Safe Fallback
+      - name: Integrasi Root + SuSFS + Pemusnahan Total Simbol Pzqqt (Tanpa Stub)
         run: |
           cd kernel
 
-          echo ">>> [1/4] Mengembalikan file hook (exec.c, hooks.c, selinuxfs.c) ke versi murni sebelum KSU Pzqqt..."
-          for f in fs/exec.c security/selinux/hooks.c security/selinux/selinuxfs.c fs/open.c fs/read_write.c fs/stat.c fs/namei.c drivers/input/input.c; do
-            if [ -f "$f" ]; then
-              # Gunakan satu regex -G dengan OR (|) agar tepat menemukan commit awal modifikasi KSU Pzqqt per file
-              FIRST_KSU_COMMIT=$(git log --format="%H" -G"my_setprocattr|my_write_context|my_write_access|ksu_setup_preinit_file|ksu_preinit_handle_post_execveat|ksu_handle_" -- "$f" | tail -n 1)
-              if [ -n "$FIRST_KSU_COMMIT" ]; then
-                echo ">>> Memulihkan $f ke commit bersih ${FIRST_KSU_COMMIT}~1"
-                git checkout "${FIRST_KSU_COMMIT}~1" -- "$f" || true
-              fi
-            fi
-          done
-
-          # Bersihkan direktori KernelSU lama Pzqqt
+          # 1. Bersihkan KernelSU lama Pzqqt
           rm -rf KernelSU drivers/kernelsu
           sed -i '/kernelsu/d' drivers/Makefile || true
           sed -i '/kernelsu/d' drivers/Kconfig || true
-          git add -A && git commit -m "clean-gki-base" || true
+          git add -A && git commit -m "clean-pre-root" || true
 
-          echo ">>> [2/4] Mengintegrasikan Root (${{ github.event.inputs.root_variant }})..."
+          # 2. Pasang Root pilihan (BakaSU / KernelSU Next)
           if [ "${{ github.event.inputs.root_variant }}" = "bakasu" ]; then
+            echo ">>> Mengintegrasikan BakaSU (ReSukiSU)..."
             curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash -s main || \
             curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash
           else
+            echo ">>> Mengintegrasikan KernelSU Next..."
             if [ "${{ github.event.inputs.enable_susfs }}" = "true" ]; then
               curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next-susfs || \
               curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
@@ -129,7 +119,7 @@ jobs:
             fi
           fi
 
-          echo ">>> [3/4] Menerapkan Patch SuSFS..."
+          # 3. Terapkan Patch SuSFS
           SUSFS_OK="false"
           if [ "${{ github.event.inputs.enable_susfs }}" = "true" ] && [ -d "../susfs4ksu" ]; then
             cp -r ../susfs4ksu/kernel_patches/fs/* fs/
@@ -159,35 +149,46 @@ jobs:
           fi
           echo "SUSFS_APPLIED=$SUSFS_OK" >> $GITHUB_ENV
 
-          echo ">>> [4/4] Verifikasi akhir & injeksi LTO-Safe Stub dengan sintaks __attribute__((used, noinline, weak))..."
+          # =========================================================================
+          # 4. BEDAH TOTAL PYTHON: HAPUS/NETRALISIR TOTAL PEMANGGILAN MY_SETPROCATTR & KSU_PREINIT
+          # =========================================================================
           python3 - << 'PYEOF'
           import re
 
-          targets = [
-              ("fs/exec.c", ["ksu_setup_preinit_file", "ksu_preinit_handle_post_execveat"]),
-              ("security/selinux/hooks.c", ["my_setprocattr"]),
-              ("security/selinux/selinuxfs.c", ["my_write_context", "my_write_access"]),
-          ]
+          # A. Netralkan SELinux hooks.c (ganti my_setprocattr langsung dengan return langsung atau fungsi standar)
+          with open("security/selinux/hooks.c", "r", encoding="utf-8", errors="ignore") as f:
+              hc = f.read()
+          # Ubah hook setprocattr agar langsung menunjuk ke selinux_setprocattr tanpa memanggil my_setprocattr
+          hc = hc.replace("LSM_HOOK_INIT(setprocattr, handle_selinux_setprocattr)", "LSM_HOOK_INIT(setprocattr, selinux_setprocattr)")
+          hc = re.sub(r"int\s+my_setprocattr\s*\(.*?\)\s*\{.*?\}", "", hc, flags=re.DOTALL)
+          hc = re.sub(r"extern\s+int\s+my_setprocattr\s*\(.*?\);\s*", "", hc)
+          with open("security/selinux/hooks.c", "w", encoding="utf-8") as f:
+              f.write(hc)
 
-          for fpath, syms in targets:
-              with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
-                  content = f.read()
-              appended = []
-              for s in syms:
-                  if s in content:
-                      m = re.search(r"extern\s+([^;]*?\b" + s + r"\s*\([^;]*?\))\s*;", content, flags=re.DOTALL)
-                      if m:
-                          sig = m.group(1).strip()
-                          ret_type = sig.split(s)[0].strip()
-                          body = "{}" if ("void" in ret_type and "*" not in ret_type) else "{ return 0; }"
-                          # Gunakan __attribute__((used, noinline, weak)) standar Clang/GCC (bukan __noinline!)
-                          appended.append(f"__attribute__((used, noinline, weak)) {sig} {body}\n")
-                          print(f"[FALLBACK] Menambahkan LTO-safe stub di {fpath}: {sig}")
-              if appended:
-                  with open(fpath, "a", encoding="utf-8") as f:
-                      f.write("\n/* LTO-safe fallback stubs */\n" + "".join(appended))
-              else:
-                  print(f"[CLEAN] {fpath} 100% bersih dari simbol legacy Pzqqt!")
+          # B. Netralkan SELinux selinuxfs.c (ganti handle_sel_write_* dengan fungsi standar)
+          with open("security/selinux/selinuxfs.c", "r", encoding="utf-8", errors="ignore") as f:
+              sc = f.read()
+          sc = sc.replace(".write\t\t= handle_sel_write_context,", ".write\t\t= sel_write_context,")
+          sc = sc.replace(".write\t\t= handle_sel_write_access,", ".write\t\t= sel_write_access,")
+          sc = re.sub(r"=\s*handle_sel_write_context\b", "= sel_write_context", sc)
+          sc = re.sub(r"=\s*handle_sel_write_access\b", "= sel_write_access", sc)
+          sc = re.sub(r"extern\s+ssize_t\s+my_write_context\s*\(.*?\);\s*", "", sc)
+          sc = re.sub(r"extern\s+ssize_t\s+my_write_access\s*\(.*?\);\s*", "", sc)
+          with open("security/selinux/selinuxfs.c", "w", encoding="utf-8") as f:
+              f.write(sc)
+
+          # C. Netralkan fs/exec.c dari panggilan preinit pzqqt
+          with open("fs/exec.c", "r", encoding="utf-8", errors="ignore") as f:
+              ec = f.read()
+          # Hapus total baris extern dan fungsi pemanggil preinit di exec.c
+          ec = re.sub(r"extern\s+void\s+ksu_setup_preinit_file\s*\(.*?\);\s*", "", ec, flags=re.DOTALL)
+          ec = re.sub(r"extern\s+void\s+ksu_preinit_handle_post_execveat\s*\(.*?\);\s*", "", ec, flags=re.DOTALL)
+          ec = re.sub(r"\bksu_setup_preinit_file\s*\(.*?\);\s*", "", ec, flags=re.DOTALL)
+          ec = re.sub(r"\bksu_preinit_handle_post_execveat\s*\(.*?\);\s*", "", ec, flags=re.DOTALL)
+          with open("fs/exec.c", "w", encoding="utf-8") as f:
+              f.write(ec)
+
+          print("[OK] Semua simbol hantu Pzqqt berhasil dibersihkan total tanpa stub!")
           PYEOF
 
       - name: Konfigurasi Defconfig Full Security & Stealth (ABI-Safe)
