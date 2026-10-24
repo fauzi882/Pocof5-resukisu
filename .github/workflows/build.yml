@@ -1,4 +1,4 @@
-name: Build Marble Kernel (Stable No-OC + KSU-Next / BakaSU + SuSFS)
+name: Build Marble Kernel (Full Security + Stealth SuSFS + Anti-Bootloop)
 
 on:
   workflow_dispatch:
@@ -12,10 +12,18 @@ on:
           - bakasu
           - kernelsu-next
       enable_susfs:
-        description: 'Integrasikan Patch SuSFS (Root Hiding Level Kernel)'
+        description: 'Integrasikan Patch SuSFS (Stealth Root Hiding Level Kernel)'
         required: true
         default: true
         type: boolean
+      security_level:
+        description: 'Level Keamanan & Hardening (Stealth Anti-Deteksi + Network Shield)'
+        required: true
+        default: 'maximum_stealth'
+        type: choice
+        options:
+          - maximum_stealth
+          - standard_secure
       tcp_profile:
         description: 'Optimasi Latensi BBR (Aman Tanpa Ubah Struktur ABI)'
         required: true
@@ -36,7 +44,6 @@ on:
 env:
   KERNEL_REPO: "https://github.com/Pzqqt/android_kernel_xiaomi_marble.git"
   AK3_MARBLE_REPO: "https://github.com/Pzqqt/AnyKernel3.git"
-  AK3_FALLBACK_REPO: "https://github.com/osm0sis/AnyKernel3.git"
   SUSFS_REPO: "https://gitlab.com/simonpunk/susfs4ksu.git"
   SUSFS_BRANCH: "gki-android12-5.10"
   CLANG_URL: "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r536225.tar.gz"
@@ -72,34 +79,53 @@ jobs:
           rm -f clang.tar.gz
           echo "$HOME/toolchains/clang/bin" >> $GITHUB_PATH
 
-      - name: Clone Source Kernel Pzqqt (Marble)
+      - name: Clone Source Kernel Pzqqt Dengan Riwayat Commit
         run: |
-          git clone --depth=50 -b "${{ github.event.inputs.kernel_branch }}" "${{ env.KERNEL_REPO }}" kernel
+          git clone --depth=100 -b "${{ github.event.inputs.kernel_branch }}" "${{ env.KERNEL_REPO }}" kernel
           cd kernel
-          git config user.name "kanha-builder"
-          git config user.email "builder@localhost"
+          git config user.name "build-user"
+          git config user.email "build-user@android"
 
       - name: Siapkan Repo SuSFS (gki-android12-5.10)
         if: ${{ github.event.inputs.enable_susfs == 'true' }}
         run: |
           git clone --depth=1 -b "${{ env.SUSFS_BRANCH }}" "${{ env.SUSFS_REPO }}" susfs4ksu
 
-      - name: Revert Hook KSU Custom Pzqqt & Integrasi BakaSU / KSU-Next + SuSFS
+      - name: Pulihkan File GKI Murni (Cegah Infinite Loop Bootloop) & Integrasi Root + SuSFS
         run: |
           cd kernel
 
-          # 1. Jika di log commit Pzqqt ada commit "KernelSU" bawaan yang memodifikasi fs/exec.c & selinux,
-          #    kita revert commit hook spesifik tersebut agar fs/exec.c & selinux kembali 100% standar GKI!
-          for commit_hash in $(git log --grep="KernelSU\|ksu\|KSU" --format="%H" -n 10); do
-            git revert --no-commit "$commit_hash" 2>/dev/null || git revert --abort 2>/dev/null || true
+          echo ">>> Memulihkan file fs/ & security/selinux/ ke kondisi GKI murni sebelum hook custom Pzqqt..."
+          for target_file in fs/exec.c security/selinux/hooks.c security/selinux/selinuxfs.c fs/open.c fs/read_write.c fs/stat.c drivers/input/input.c; do
+            if [ -f "$target_file" ]; then
+              BAD_COMMIT=$(git log -S "my_setprocattr" -S "ksu_setup_preinit_file" -S "ksu_handle_" --oneline "$target_file" | tail -n 1 | awk '{print $1}')
+              if [ -n "$BAD_COMMIT" ]; then
+                echo ">>> Memulihkan $target_file ke kondisi bersih sebelum commit $BAD_COMMIT..."
+                git checkout "${BAD_COMMIT}~1" -- "$target_file" 2>/dev/null || true
+              fi
+            fi
           done
 
-          # Pastikan direktori KernelSU lama bersih
+          # Jika shallow clone 100 commit masih menyisakan simbol custom Pzqqt, tarik lebih dalam dan checkout bersih
+          if grep -q "my_setprocattr" security/selinux/hooks.c || grep -q "my_write_context" security/selinux/selinuxfs.c || grep -q "ksu_setup_preinit_file" fs/exec.c; then
+            echo ">>> Mengambil git history lebih dalam untuk memulihkan security/selinux & fs/exec.c murni..."
+            git fetch --deepen=500
+            for target_file in fs/exec.c security/selinux/hooks.c security/selinux/selinuxfs.c fs/open.c fs/read_write.c fs/stat.c drivers/input/input.c; do
+              BAD_COMMIT=$(git log -G"my_setprocattr|my_write_context|ksu_setup_preinit_file|ksu_handle_" --format="%H" -- "$target_file" | tail -n 1)
+              if [ -n "$BAD_COMMIT" ]; then
+                echo ">>> Checkout bersih $target_file dari ${BAD_COMMIT}~1"
+                git checkout "${BAD_COMMIT}~1" -- "$target_file"
+              fi
+            done
+          fi
+
+          # Bersihkan direktori KernelSU lama bawaan Pzqqt
           rm -rf KernelSU drivers/kernelsu
           sed -i '/kernelsu/d' drivers/Makefile || true
           sed -i '/kernelsu/d' drivers/Kconfig || true
+          git add -A && git commit -m "Restore clean GKI state before KSU integration" || true
 
-          # 2. Pasang Root pilihan (BakaSU atau KernelSU Next)
+          # Pasang Root pilihan (BakaSU atau KernelSU Next)
           if [ "${{ github.event.inputs.root_variant }}" = "bakasu" ]; then
             echo ">>> Mengintegrasikan BakaSU (ReSukiSU)..."
             curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash -s main || \
@@ -114,7 +140,7 @@ jobs:
             fi
           fi
 
-          # 3. Terapkan patch SuSFS
+          # Terapkan patch SuSFS
           SUSFS_OK="false"
           if [ "${{ github.event.inputs.enable_susfs }}" = "true" ] && [ -d "../susfs4ksu" ]; then
             cp -r ../susfs4ksu/kernel_patches/fs/* fs/
@@ -125,9 +151,11 @@ jobs:
               if patch -p1 --dry-run --fuzz=3 < "$PATCH_FILE" >/dev/null 2>&1; then
                 patch -p1 --forward --fuzz=3 < "$PATCH_FILE"
                 SUSFS_OK="true"
+                echo ">>> Patch SuSFS berhasil diterapkan 100%!"
               elif git apply --3way --check "$PATCH_FILE" >/dev/null 2>&1; then
                 git apply --3way "$PATCH_FILE"
                 SUSFS_OK="true"
+                echo ">>> Patch SuSFS berhasil diterapkan via 3-way merge!"
               else
                 rm -f fs/susfs.c fs/sus_su.c include/linux/susfs*.h
                 SUSFS_OK="false"
@@ -142,55 +170,16 @@ jobs:
           fi
           echo "SUSFS_APPLIED=$SUSFS_OK" >> $GITHUB_ENV
 
-          # 4. Pengaman Fallback: Jika revert commit di atas tidak menghapus hook legacy Pzqqt,
-          #    pasang jembatan aman yang memanggil fungsi SELinux asli beserta semua argumennya
-          python3 - << 'PYEOF'
-          import re
-
-          with open("fs/exec.c", "r", encoding="utf-8", errors="ignore") as f:
-              exec_content = f.read()
-
-          stubs = []
-          for fn in ["ksu_setup_preinit_file", "ksu_preinit_handle_post_execveat"]:
-              pattern = r"extern\s+([^;]*?\b" + fn + r"\s*\([^;]*?\))\s*;"
-              m = re.search(pattern, exec_content, re.DOTALL)
-              if m:
-                  decl = m.group(1).strip()
-                  ret_part = decl.split(fn)[0].strip()
-                  if "void" in ret_part and "*" not in ret_part:
-                      stubs.append(f"__attribute__((weak)) {decl} {{}}\n")
-                  else:
-                      stubs.append(f"__attribute__((weak)) {decl} {{ return 0; }}\n")
-
-          if stubs:
-              with open("fs/exec.c", "a", encoding="utf-8") as f:
-                  f.write("\n/* Safe no-op weak stubs */\n")
-                  for s in stubs:
-                      f.write(s)
-
-          for filepath, replacements in [
-              ("security/selinux/hooks.c", [("my_setprocattr", "selinux_setprocattr")]),
-              ("security/selinux/selinuxfs.c", [("my_write_context", "sel_write_context"), ("my_write_access", "sel_write_access")])
-          ]:
-              with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
-                  content = f.read()
-              for old_fn, orig_fn in replacements:
-                  content = content.replace(f"return {old_fn}(", f"return {orig_fn}(")
-              with open(filepath, "w", encoding="utf-8") as f:
-                  f.write(content)
-          PYEOF
-
-      - name: Konfigurasi Defconfig Minimal & Aman (Anti-Bootloop / ABI Safe)
+      - name: Konfigurasi Defconfig Full Security & Stealth (ABI-Safe / Anti-Bootloop)
         run: |
           cd kernel
 
-          # Tuning ringan konstanta internal BBR (Tidak mengubah ABI atau struct kernel sama sekali)
+          # Tuning konstanta internal BBR (Aman 100% bagi KMI ABI)
           if [ "${{ github.event.inputs.tcp_profile }}" = "bbr_plus_tuned" ] && [ -f "net/ipv4/tcp_bbr.c" ]; then
             sed -i 's/static const u32 bbr_min_rtt_win_sec = 10;/static const u32 bbr_min_rtt_win_sec = 5;/g' net/ipv4/tcp_bbr.c || true
             sed -i 's/static const u32 bbr_probe_rtt_mode_ms = 200;/static const u32 bbr_probe_rtt_mode_ms = 100;/g' net/ipv4/tcp_bbr.c || true
           fi
 
-          # Gunakan defconfig bawaan Pzqqt TANPA mengubah HZ, Scheduler, atau Memory Layout
           if [ -f "arch/arm64/configs/marble_defconfig" ]; then
             DEFCONFIG_NAME="marble_defconfig"
             DEFCONFIG_FILE="arch/arm64/configs/marble_defconfig"
@@ -203,22 +192,31 @@ jobs:
           fi
 
           echo "TARGET_DEFCONFIG=$DEFCONFIG_NAME" >> $GITHUB_ENV
-          echo ">>> Menggunakan Defconfig Asli: $DEFCONFIG_FILE"
 
-          # HANYA tambahkan config KSU, SuSFS, dan BBR (Tanpa Overclock / Tanpa Ubah HZ)
           cat << 'EOF' >> "$DEFCONFIG_FILE"
+          # === COMPILER & CORE ROOT ===
           CONFIG_WERROR=n
           CONFIG_KSU=y
           CONFIG_KPROBES=y
           CONFIG_HAVE_KPROBES=y
           CONFIG_KPROBE_EVENTS=y
+
+          # === NETWORK & BBR ===
           CONFIG_TCP_CONG_ADVANCED=y
           CONFIG_TCP_CONG_BBR=y
           CONFIG_DEFAULT_BBR=y
           CONFIG_DEFAULT_TCP_CONG="bbr"
           CONFIG_NET_SCH_FQ=y
+
+          # === KERNEL SECURITY & HARDENING (100% GKI ABI SAFE) ===
+          CONFIG_SYN_COOKIES=y
+          CONFIG_SECURITY_DMESG_RESTRICT=y
+          CONFIG_SECURITY_NETWORK=y
+          CONFIG_SECURITY_SELINUX=y
+          CONFIG_BPF_JIT_ALWAYS_ON=y
           EOF
 
+          # Konfigurasi SuSFS dengan Mode Stealth Penuh (Matikan Log SuSFS di mode maximum_stealth agar tidak terdeteksi di dmesg)
           if [ "${{ env.SUSFS_APPLIED }}" = "true" ]; then
             cat << 'EOF' >> "$DEFCONFIG_FILE"
           CONFIG_KSU_SUSFS=y
@@ -230,21 +228,26 @@ jobs:
           CONFIG_KSU_SUSFS_TRY_UMOUNT=y
           CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y
           CONFIG_KSU_SUSFS_SPOOF_UNAME=y
-          CONFIG_KSU_SUSFS_ENABLE_LOG=y
           CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
           CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
           CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
           CONFIG_KSU_SUSFS_SUS_SU=n
           EOF
+            if [ "${{ github.event.inputs.security_level }}" = "maximum_stealth" ]; then
+              echo "CONFIG_KSU_SUSFS_ENABLE_LOG=n" >> "$DEFCONFIG_FILE"
+            else
+              echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> "$DEFCONFIG_FILE"
+            fi
           else
             echo "CONFIG_KSU_SUSFS=n" >> "$DEFCONFIG_FILE"
           fi
 
-      - name: Kompilasi Kernel Marble (Flag Standar GKI Tanpa Overclock)
+      - name: Kompilasi Kernel Marble (Stealth GKI Identity)
         run: |
           cd kernel
-          export KBUILD_BUILD_USER="melt"
-          export KBUILD_BUILD_HOST="poco-f5"
+          # Samarkan identitas build agar terlihat seperti kernel GKI resmi Google (Anti-Deteksi via /proc/version)
+          export KBUILD_BUILD_USER="build-user"
+          export KBUILD_BUILD_HOST="build-host"
 
           make O=out ARCH=arm64 \
             CC="ccache clang" \
@@ -259,7 +262,6 @@ jobs:
           ./scripts/config --file out/.config -d WERROR -d CONFIG_WERROR -d KSU_SUSFS_SUS_SU --set-val FRAME_WARN 4096
           make O=out ARCH=arm64 CC="ccache clang" LLVM=1 LLVM_IAS=1 olddefconfig
 
-          # Kompilasi Murni Standar GKI (Tanpa -O3 atau -march custom yang bisa bikin panic)
           set +e
           make -j$(nproc --all) \
             O=out \
@@ -279,88 +281,98 @@ jobs:
             exit $BUILD_STATUS
           fi
 
-      - name: Paketkan ke AnyKernel3 Khusus Marble (Anti-Bootloop)
+      - name: Paketkan ke AnyKernel3 Resmi Pzqqt + Modul Full Security & Anti-Deteksi
         run: |
-          # Gunakan repo AnyKernel3 khusus Marble milik Pzqqt (fallback ke osm0sis dengan konfigurasi GKI murni)
-          if git clone --depth=1 "${{ env.AK3_MARBLE_REPO }}" AnyKernel3 2>/dev/null; then
-            echo ">>> Menggunakan AnyKernel3 resmi Pzqqt untuk Marble..."
-          else
-            git clone --depth=1 "${{ env.AK3_FALLBACK_REPO }}" AnyKernel3
-            cd AnyKernel3
-            cat << 'EOF' > anykernel.sh
-          ### AnyKernel3 Ramdisk Mod Script for POCO F5 (marble) GKI 2.0
-          properties() { '
-          kernel.string=Melt Kernel POCO F5 (marble)
-          do.devicecheck=1
-          do.modules=0
-          do.systemless=1
-          do.cleanup=1
-          do.cleanuponabort=0
-          device.name1=marble
-          device.name2=marblein
-          device.name3=POCO F5
-          device.name4=Redmi Note 12 Turbo
-          supported.versions=12-16
-          supported.patchlevels=
-          '; }
-
-          block=/dev/block/bootdevice/by-name/boot;
-          is_slot_device=1;
-          ramdisk_compression=auto;
-          patch_vbmeta_flag=auto;
-
-          . tools/ak3-core.sh;
-
-          split_boot;
-          flash_boot;
-          EOF
-            cd ..
-          fi
-
+          git clone --depth=1 "${{ env.AK3_MARBLE_REPO }}" AnyKernel3
           cd AnyKernel3
           rm -rf .git README.md
 
-          # Pastikan menyalin format Image yang tepat (GKI 2.0 Marble memakai Image atau Image.gz)
           if grep -q "Image.gz" anykernel.sh 2>/dev/null && [ -f "../kernel/out/arch/arm64/boot/Image.gz" ]; then
             cp ../kernel/out/arch/arm64/boot/Image.gz .
-          elif [ -f "../kernel/out/arch/arm64/boot/Image" ]; then
+          else
             cp ../kernel/out/arch/arm64/boot/Image .
-            [ -f "../kernel/out/arch/arm64/boot/Image.gz" ] && cp ../kernel/out/arch/arm64/boot/Image.gz .
           fi
 
-          # Sertakan skrip userspace tuning (Aman 100%, berjalan SETELAH HP selesai nyala)
-          cat << 'EOF' > marble_postboot_tune.sh
+          # Buat skrip pasca-boot yang menggabungkan Keamanan Kernel, Stealth Anti-Deteksi, Sinyal, GPS, & Efisiensi
+          cat << 'EOF' > marble_security_tune.sh
           #!/system/bin/sh
           while [ "$(getprop sys.boot_completed)" != "1" ]; do
             sleep 3
           done
 
-          # 1. BBR + FQ Network Latency Tune
+          # =====================================================================
+          # 1. KERNEL MEMORY & LOG LOCKDOWN (CEGAH SPYWARE & DETEKTOR ROOT)
+          # =====================================================================
+          echo 2 > /proc/sys/kernel/kptr_restrict 2>/dev/null
+          echo 1 > /proc/sys/kernel/dmesg_restrict 2>/dev/null
+          echo 3 > /proc/sys/kernel/perf_event_paranoid 2>/dev/null
+          echo 1 > /proc/sys/kernel/unprivileged_bpf_disabled 2>/dev/null
+          echo 2 > /proc/sys/kernel/randomize_va_space 2>/dev/null
+          echo 1 > /proc/sys/fs/protected_hardlinks 2>/dev/null
+          echo 1 > /proc/sys/fs/protected_symlinks 2>/dev/null
+          echo 0 > /proc/sys/kernel/sysrq 2>/dev/null
+
+          # =====================================================================
+          # 2. NETWORK SHIELD (ANTI-MITM, ANTI-SPOOFING, ANTI-UPTIME TRACKING)
+          # =====================================================================
+          echo 1 > /proc/sys/net/ipv4/tcp_syncookies 2>/dev/null
+          echo 1 > /proc/sys/net/ipv4/tcp_rfc1337 2>/dev/null
+          echo 0 > /proc/sys/net/ipv4/tcp_timestamps 2>/dev/null
+          echo 1 > /proc/sys/net/ipv4/conf/all/rp_filter 2>/dev/null
+          echo 1 > /proc/sys/net/ipv4/conf/default/rp_filter 2>/dev/null
+          echo 0 > /proc/sys/net/ipv4/conf/all/accept_redirects 2>/dev/null
+          echo 0 > /proc/sys/net/ipv4/conf/default/accept_redirects 2>/dev/null
+          echo 0 > /proc/sys/net/ipv4/conf/all/secure_redirects 2>/dev/null
+          echo 0 > /proc/sys/net/ipv4/conf/all/send_redirects 2>/dev/null
+          echo 0 > /proc/sys/net/ipv4/conf/all/accept_source_route 2>/dev/null
+          echo 0 > /proc/sys/net/ipv6/conf/all/accept_redirects 2>/dev/null
+          echo 0 > /proc/sys/net/ipv6/conf/default/accept_redirects 2>/dev/null
+          echo 1 > /proc/sys/net/ipv4/icmp_echo_ignore_broadcasts 2>/dev/null
+          echo 1 > /proc/sys/net/ipv4/icmp_ignore_bogus_error_responses 2>/dev/null
+
+          # =====================================================================
+          # 3. STEALTH BOOTLOADER & VERIFIED BOOT SPOOFING (ANTI-DETEKSI BANK/GAME)
+          # =====================================================================
+          resetprop -n ro.boot.vbmeta.device_state locked
+          resetprop -n ro.boot.verifiedbootstate green
+          resetprop -n ro.boot.flash.locked 1
+          resetprop -n ro.boot.veritymode enforcing
+          resetprop -n ro.boot.warranty_bit 0
+          resetprop -n ro.warranty_bit 0
+          resetprop -n ro.debuggable 0
+          resetprop -n ro.secure 1
+          resetprop -n vendor.boot.vbmeta.device_state locked
+          resetprop -n vendor.boot.verifiedbootstate green
+
+          # =====================================================================
+          # 4. BBR + FQ, PENGUAT SINYAL MODEM, GPS & EFISIENSI BATERAI
+          # =====================================================================
           echo "bbr" > /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null
           echo "fq" > /proc/sys/net/core/default_qdisc 2>/dev/null
           echo 0 > /proc/sys/net/ipv4/tcp_slow_start_after_idle 2>/dev/null
 
-          # 2. Penguat Sinyal & Stabilitas Modem
           resetprop -n persist.vendor.radio.add_power_save 0
+          resetprop -n persist.vendor.radio.apm_sim_not_pwdn 1
           resetprop -n persist.vendor.radio.sib16_support 1
+          resetprop -n persist.vendor.overlay.izat.optin rro
+          resetprop -n persist.backup.ntpServer "0.id.pool.ntp.org"
 
-          # 3. Efisiensi Baterai & Responsivitas Schedutil Standar
           for gov in /sys/devices/system/cpu/cpufreq/policy*; do
             echo 1000 > "$gov/schedutil/up_rate_limit_us" 2>/dev/null
             echo 5000 > "$gov/schedutil/down_rate_limit_us" 2>/dev/null
           done
           EOF
-          chmod 0755 marble_postboot_tune.sh
+          chmod 0755 marble_security_tune.sh
 
           BUILD_DATE=$(date +"%Y%m%d-%H%M")
-          ZIP_NAME="Melt-Marble-Stable-${{ github.event.inputs.root_variant }}-SuSFS_${{ env.SUSFS_APPLIED }}-${BUILD_DATE}.zip"
+          ZIP_NAME="Melt-Marble-FullSec-${{ github.event.inputs.root_variant }}-SuSFS_${{ env.SUSFS_APPLIED }}-${BUILD_DATE}.zip"
           zip -r9 "../${ZIP_NAME}" * -x "*.git*"
           echo "ZIP_OUTPUT=${ZIP_NAME}" >> $GITHUB_ENV
 
       - name: Upload Artifact Flashable Kernel ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: Melt-Kernel-Marble-Stable-${{ github.event.inputs.root_variant }}
+          name: Melt-Kernel-Marble-FullSecurity-${{ github.event.inputs.root_variant }}
           path: ${{ env.ZIP_OUTPUT }}
           retention-days: 14
           
