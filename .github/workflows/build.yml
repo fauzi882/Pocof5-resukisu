@@ -1,4 +1,4 @@
-name: Build Marble Kernel (Pzqqt Purge + Full Security + SuSFS)
+name: Build Marble Kernel (Zero-Delete Safe Stub + Clean Boot + Full Security)
 
 on:
   workflow_dispatch:
@@ -94,17 +94,17 @@ jobs:
         run: |
           git clone --depth=1 -b "${{ env.SUSFS_BRANCH }}" "${{ env.SUSFS_REPO }}" susfs4ksu
 
-      - name: Integrasi Root + SuSFS + Pemusnahan Total Simbol Pzqqt (Tanpa Stub)
+      - name: Integrasi Root + SuSFS + Zero-Delete Exact Weak Stubs
         run: |
           cd kernel
 
-          # 1. Bersihkan KernelSU lama Pzqqt
+          # 1. Bersihkan direktori KernelSU lama bawaan Pzqqt
           rm -rf KernelSU drivers/kernelsu
           sed -i '/kernelsu/d' drivers/Makefile || true
           sed -i '/kernelsu/d' drivers/Kconfig || true
           git add -A && git commit -m "clean-pre-root" || true
 
-          # 2. Pasang Root pilihan (BakaSU / KernelSU Next)
+          # 2. Pasang Root pilihan (BakaSU atau KernelSU Next)
           if [ "${{ github.event.inputs.root_variant }}" = "bakasu" ]; then
             echo ">>> Mengintegrasikan BakaSU (ReSukiSU)..."
             curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash -s main || \
@@ -150,45 +150,58 @@ jobs:
           echo "SUSFS_APPLIED=$SUSFS_OK" >> $GITHUB_ENV
 
           # =========================================================================
-          # 4. BEDAH TOTAL PYTHON: HAPUS/NETRALISIR TOTAL PEMANGGILAN MY_SETPROCATTR & KSU_PREINIT
+          # 4. METODE ZERO-DELETE: JANGAN HAPUS KODE DI EXEC.C / HOOKS.C!
+          #    CUKUP APPEND __attribute__((weak)) DI BARIS PALING BAWAH FILE
+          #    + BYPASS TABEL HOOK SELINUX AGAR TIDAK INFINITE LOOP SAAT BOOTING
           # =========================================================================
           python3 - << 'PYEOF'
           import re
 
-          # A. Netralkan SELinux hooks.c (ganti my_setprocattr langsung dengan return langsung atau fungsi standar)
+          # A. Di security/selinux/hooks.c:
+          #    Hanya ubah pendaftaran tabel LSM_HOOK_INIT agar menunjuk langsung ke selinux_setprocattr asli (Anti-Bootloop)
           with open("security/selinux/hooks.c", "r", encoding="utf-8", errors="ignore") as f:
-              hc = f.read()
-          # Ubah hook setprocattr agar langsung menunjuk ke selinux_setprocattr tanpa memanggil my_setprocattr
-          hc = hc.replace("LSM_HOOK_INIT(setprocattr, handle_selinux_setprocattr)", "LSM_HOOK_INIT(setprocattr, selinux_setprocattr)")
-          hc = re.sub(r"int\s+my_setprocattr\s*\(.*?\)\s*\{.*?\}", "", hc, flags=re.DOTALL)
-          hc = re.sub(r"extern\s+int\s+my_setprocattr\s*\(.*?\);\s*", "", hc)
+              hooks_code = f.read()
+          hooks_code = hooks_code.replace(
+              "LSM_HOOK_INIT(setprocattr, handle_selinux_setprocattr)",
+              "LSM_HOOK_INIT(setprocattr, selinux_setprocattr)"
+          )
           with open("security/selinux/hooks.c", "w", encoding="utf-8") as f:
-              f.write(hc)
+              f.write(hooks_code)
 
-          # B. Netralkan SELinux selinuxfs.c (ganti handle_sel_write_* dengan fungsi standar)
+          # B. Di security/selinux/selinuxfs.c:
+          #    Hanya ubah pointer struktur file_operations kembali ke sel_write_context & sel_write_access asli (Anti-Bootloop)
           with open("security/selinux/selinuxfs.c", "r", encoding="utf-8", errors="ignore") as f:
-              sc = f.read()
-          sc = sc.replace(".write\t\t= handle_sel_write_context,", ".write\t\t= sel_write_context,")
-          sc = sc.replace(".write\t\t= handle_sel_write_access,", ".write\t\t= sel_write_access,")
-          sc = re.sub(r"=\s*handle_sel_write_context\b", "= sel_write_context", sc)
-          sc = re.sub(r"=\s*handle_sel_write_access\b", "= sel_write_access", sc)
-          sc = re.sub(r"extern\s+ssize_t\s+my_write_context\s*\(.*?\);\s*", "", sc)
-          sc = re.sub(r"extern\s+ssize_t\s+my_write_access\s*\(.*?\);\s*", "", sc)
+              sfs_code = f.read()
+          sfs_code = sfs_code.replace("handle_sel_write_context,", "sel_write_context,")
+          sfs_code = sfs_code.replace("handle_sel_write_access,", "sel_write_access,")
           with open("security/selinux/selinuxfs.c", "w", encoding="utf-8") as f:
-              f.write(sc)
+              f.write(sfs_code)
 
-          # C. Netralkan fs/exec.c dari panggilan preinit pzqqt
-          with open("fs/exec.c", "r", encoding="utf-8", errors="ignore") as f:
-              ec = f.read()
-          # Hapus total baris extern dan fungsi pemanggil preinit di exec.c
-          ec = re.sub(r"extern\s+void\s+ksu_setup_preinit_file\s*\(.*?\);\s*", "", ec, flags=re.DOTALL)
-          ec = re.sub(r"extern\s+void\s+ksu_preinit_handle_post_execveat\s*\(.*?\);\s*", "", ec, flags=re.DOTALL)
-          ec = re.sub(r"\bksu_setup_preinit_file\s*\(.*?\);\s*", "", ec, flags=re.DOTALL)
-          ec = re.sub(r"\bksu_preinit_handle_post_execveat\s*\(.*?\);\s*", "", ec, flags=re.DOTALL)
-          with open("fs/exec.c", "w", encoding="utf-8") as f:
-              f.write(ec)
+          # C. Ekstrak prototype extern 1:1 dan tambahkan __attribute__((weak)) di AKHIR file (100% Aman Tanpa Merusak #ifdef)
+          targets = [
+              ("fs/exec.c", ["ksu_setup_preinit_file", "ksu_preinit_handle_post_execveat"]),
+              ("security/selinux/hooks.c", ["my_setprocattr"]),
+              ("security/selinux/selinuxfs.c", ["my_write_context", "my_write_access"]),
+          ]
 
-          print("[OK] Semua simbol hantu Pzqqt berhasil dibersihkan total tanpa stub!")
+          for fpath, syms in targets:
+              with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
+                  content = f.read()
+              stubs = []
+              for fn in syms:
+                  pattern = r"extern\s+([^;]*?\b" + fn + r"\s*\([^;]*?\))\s*;"
+                  m = re.search(pattern, content, flags=re.DOTALL)
+                  if m:
+                      decl = m.group(1).strip()
+                      ret_part = decl.split(fn)[0].strip()
+                      if "void" in ret_part and "*" not in ret_part:
+                          stubs.append(f"__attribute__((weak)) {decl} {{}}\n")
+                      else:
+                          stubs.append(f"__attribute__((weak)) {decl} {{ return 0; }}\n")
+                      print(f"[OK] Berhasil membuat weak stub 1:1 untuk {fn} di {fpath}")
+              if stubs:
+                  with open(fpath, "a", encoding="utf-8") as f:
+                      f.write("\n/* Safe weak stubs at EOF */\n" + "".join(stubs))
           PYEOF
 
       - name: Konfigurasi Defconfig Full Security & Stealth (ABI-Safe)
