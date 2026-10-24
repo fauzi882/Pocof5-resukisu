@@ -41,6 +41,9 @@ on:
           - melt-rebase
           - bouquet
 
+permissions:
+  contents: read
+
 env:
   KERNEL_REPO: "https://github.com/Pzqqt/android_kernel_xiaomi_marble.git"
   AK3_MARBLE_REPO: "https://github.com/Pzqqt/AnyKernel3.git"
@@ -81,8 +84,6 @@ jobs:
 
       - name: Clone Source Kernel Pzqqt
         run: |
-          # Clone dengan filter blob:none agar seluruh riwayat commit terambil cepat (<10 detik)
-          # sehingga kita bisa checkout file fs/exec.c & selinux versi murni sebelum modifikasi KSU Pzqqt!
           git clone --filter=blob:none -b "${{ github.event.inputs.kernel_branch }}" "${{ env.KERNEL_REPO }}" kernel
           cd kernel
           git config user.name "build-user"
@@ -100,11 +101,11 @@ jobs:
           echo ">>> [1/4] Mengembalikan file hook (exec.c, hooks.c, selinuxfs.c) ke versi murni sebelum KSU Pzqqt..."
           for f in fs/exec.c security/selinux/hooks.c security/selinux/selinuxfs.c fs/open.c fs/read_write.c fs/stat.c fs/namei.c drivers/input/input.c; do
             if [ -f "$f" ]; then
-              # Cari commit paling awal yang menyuntikkan simbol KSU custom Pzqqt pada file tersebut
-              FIRST_KSU_COMMIT=$(git log --format="%H" -S "my_setprocattr" -S "my_write_context" -S "ksu_setup_preinit_file" -S "ksu_handle_" -- "$f" | tail -n 1)
+              # Gunakan satu regex -G dengan OR (|) agar tepat menemukan commit awal modifikasi KSU Pzqqt per file
+              FIRST_KSU_COMMIT=$(git log --format="%H" -G"my_setprocattr|my_write_context|my_write_access|ksu_setup_preinit_file|ksu_preinit_handle_post_execveat|ksu_handle_" -- "$f" | tail -n 1)
               if [ -n "$FIRST_KSU_COMMIT" ]; then
                 echo ">>> Memulihkan $f ke commit bersih ${FIRST_KSU_COMMIT}~1"
-                git checkout "${FIRST_KSU_COMMIT}~1" -- "$f"
+                git checkout "${FIRST_KSU_COMMIT}~1" -- "$f" || true
               fi
             fi
           done
@@ -158,12 +159,10 @@ jobs:
           fi
           echo "SUSFS_APPLIED=$SUSFS_OK" >> $GITHUB_ENV
 
-          echo ">>> [4/4] Verifikasi akhir & injeksi LTO-Safe Stub jika masih ada simbol legacy..."
+          echo ">>> [4/4] Verifikasi akhir & injeksi LTO-Safe Stub dengan sintaks __attribute__((used, noinline, weak))..."
           python3 - << 'PYEOF'
           import re
 
-          # Cek fs/exec.c, hooks.c, dan selinuxfs.c: jika karena alasan apapun simbol Pzqqt masih ada,
-          # baca deklarasi extern aslinya (multiline-safe) dan buat definisi __used __noinline __weak yang 100% cocok!
           targets = [
               ("fs/exec.c", ["ksu_setup_preinit_file", "ksu_preinit_handle_post_execveat"]),
               ("security/selinux/hooks.c", ["my_setprocattr"]),
@@ -181,7 +180,8 @@ jobs:
                           sig = m.group(1).strip()
                           ret_type = sig.split(s)[0].strip()
                           body = "{}" if ("void" in ret_type and "*" not in ret_type) else "{ return 0; }"
-                          appended.append(f"__used __noinline __attribute__((weak)) {sig} {body}\n")
+                          # Gunakan __attribute__((used, noinline, weak)) standar Clang/GCC (bukan __noinline!)
+                          appended.append(f"__attribute__((used, noinline, weak)) {sig} {body}\n")
                           print(f"[FALLBACK] Menambahkan LTO-safe stub di {fpath}: {sig}")
               if appended:
                   with open(fpath, "a", encoding="utf-8") as f:
