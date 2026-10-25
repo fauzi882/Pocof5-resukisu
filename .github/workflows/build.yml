@@ -1,4 +1,4 @@
-name: Build Marble Kernel (Latest BakaSU Sync + Clean No-Dirty + Full Security)
+name: Build Marble Kernel (Sapu Jagat Final - Auto Flash + Clean Sync + FullSec)
 
 on:
   workflow_dispatch:
@@ -12,9 +12,9 @@ on:
           - bakasu
           - kernelsu-next
       ksu_version_override:
-        description: 'Versi Driver KSU/BakaSU (Kosongkan untuk auto-sync ke Manajer terbaru 35252)'
+        description: 'Override Versi KSU (Isi auto untuk default terbaik: 35252 di BakaSU / bawaan di KSU-Next)'
         required: false
-        default: '35252'
+        default: 'auto'
         type: string
       enable_susfs:
         description: 'Integrasikan Patch SuSFS (Stealth Root Hiding Level Kernel)'
@@ -99,7 +99,7 @@ jobs:
         run: |
           git clone --depth=1 -b "${{ env.SUSFS_BRANCH }}" "${{ env.SUSFS_REPO }}" susfs4ksu
 
-      - name: Integrasi Root Terbaru + SuSFS + Hilangkan Status Dirty
+      - name: Integrasi Root (BakaSU / KernelSU-Next) + SuSFS + Clean Commit
         run: |
           cd kernel
 
@@ -109,7 +109,7 @@ jobs:
           git add -A && git commit -m "clean-pre-root" || true
 
           if [ "${{ github.event.inputs.root_variant }}" = "bakasu" ]; then
-            echo ">>> Mengintegrasikan BakaSU dan menarik commit terbaru dari branch aktif..."
+            echo ">>> Mengintegrasikan BakaSU dan menarik commit terbaru..."
             curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash -s main || \
             curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash
             if [ -d "KernelSU" ]; then
@@ -117,20 +117,22 @@ jobs:
               git config user.name "build-user"
               git config user.email "build-user@android"
               git fetch --all --tags || true
-              # Checkout ke commit paling baru di antara semua branch remote (main/next/dev) agar sinkron dengan Manajer terbaru
               LATEST_REF=$(git for-each-ref --sort=-committerdate --format='%(refname:short)' refs/remotes/origin/ | head -n 1)
               if [ -n "$LATEST_REF" ]; then
-                echo ">>> Beralih ke branch BakaSU paling baru: $LATEST_REF"
                 git checkout -f "$LATEST_REF"
               fi
               cd ..
             fi
           else
+            echo ">>> Mengintegrasikan KernelSU-Next..."
             if [ "${{ github.event.inputs.enable_susfs }}" = "true" ]; then
               curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next-susfs || \
               curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
             else
               curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
+            fi
+            if [ -d "KernelSU-Next" ] && [ ! -d "KernelSU" ]; then
+              ln -sf KernelSU-Next KernelSU || true
             fi
           fi
 
@@ -154,24 +156,37 @@ jobs:
             fi
 
             if [ "$SUSFS_OK" = "true" ]; then
-              find KernelSU drivers/kernelsu -name "*.mk" -o -name "Makefile" -o -name "Kbuild" 2>/dev/null | while read -r mkfile; do
+              find KernelSU KernelSU-Next drivers/kernelsu -name "*.mk" -o -name "Makefile" -o -name "Kbuild" 2>/dev/null | while read -r mkfile; do
                 sed -i 's/\$(error /\$(warning /g' "$mkfile" || true
               done
             fi
           fi
           echo "SUSFS_APPLIED=$SUSFS_OK" >> $GITHUB_ENV
 
-          # SINKRONKAN VERSI DRIVER (35252 / API 6) & BERSIHKAN STATUS "-dirty" DI KERNELSU
-          if [ -d "KernelSU" ]; then
-            cd KernelSU
-            if [ -n "${{ github.event.inputs.ksu_version_override }}" ]; then
-              find . -name "Makefile" -o -name "Kbuild" -o -name "*.mk" | while read -r mf; do
-                sed -i 's/KSU_VERSION := .*/KSU_VERSION := ${{ github.event.inputs.ksu_version_override }}/g' "$mf" || true
-              done
+          # SINKRONISASI VERSI PINTAR & HAPUS STATUS "-dirty"
+          TARGET_VER="${{ github.event.inputs.ksu_version_override }}"
+          if [ "$TARGET_VER" = "auto" ]; then
+            if [ "${{ github.event.inputs.root_variant }}" = "bakasu" ]; then
+              TARGET_VER="35252"
+            else
+              TARGET_VER=""
             fi
-            git add -A && git commit -m "sync-clean-release" || true
-            cd ..
           fi
+
+          for kdir in KernelSU KernelSU-Next drivers/kernelsu; do
+            if [ -d "$kdir" ]; then
+              cd "$kdir"
+              git config user.name "build-user" || true
+              git config user.email "build-user@android" || true
+              if [ -n "$TARGET_VER" ]; then
+                find . -name "Makefile" -o -name "Kbuild" -o -name "*.mk" | while read -r mf; do
+                  sed -i "s/KSU_VERSION := .*/KSU_VERSION := ${TARGET_VER}/g" "$mf" || true
+                done
+              fi
+              git add -A && git commit -m "sync-clean-release" || true
+              cd - >/dev/null
+            fi
+          done
 
           python3 - << 'PYEOF'
           import re
@@ -229,7 +244,6 @@ jobs:
                   f.write("\n/* True SELinux passthrough bridges */\n" + "".join(sfs_stubs))
           PYEOF
 
-          # Commit seluruh pohon kernel agar string versi kernel juga bebas dari tanda "-dirty"
           git add -A && git commit -m "final-clean-tree" || true
 
       - name: Konfigurasi Defconfig Full Security & Stealth (ABI-Safe)
@@ -337,44 +351,61 @@ jobs:
             exit $BUILD_STATUS
           fi
 
-      - name: Paketkan ke AnyKernel3 dengan Konfigurasi Partisi Marble Presisi
+      - name: Paketkan ke AnyKernel3 (100% Auto-Flash Tanpa Edit MT Manager)
         run: |
           git clone --depth=1 "${{ env.AK3_REPO }}" AnyKernel3
           cd AnyKernel3
           rm -rf .git README.md modules patch ramdisk
 
-          cat << 'EOF' > anykernel.sh
-          ### AnyKernel3 Ramdisk Mod Script for POCO F5 (marble)
-          ## osm0sis @ xda-developers
+          # Cetak anykernel.sh rata kiri murni (Zero Indentation) dengan variabel HURUF KAPITAL & kecil
+          python3 - << 'PYEOF'
+          ak3_content = (
+              "### AnyKernel3 Ramdisk Mod Script\n"
+              "## osm0sis @ xda-developers\n\n"
+              "properties() { '\n"
+              "kernel.string=Melt Kernel Full Security POCO F5 (marble)\n"
+              "do.devicecheck=0\n"
+              "do.modules=0\n"
+              "do.systemless=1\n"
+              "do.cleanup=1\n"
+              "do.cleanuponabort=0\n"
+              "device.name1=marble\n"
+              "device.name2=marblein\n"
+              "supported.versions=\n"
+              "supported.patchlevels=\n"
+              "supported.vendorpatchlevels=\n"
+              "'; } # end properties\n\n"
+              "### AnyKernel install\n"
+              "## boot shell variables\n"
+              "BLOCK=boot;\n"
+              "IS_SLOT_DEVICE=1;\n"
+              "RAMDISK_COMPRESSION=auto;\n"
+              "PATCH_VBMETA_FLAG=auto;\n\n"
+              "block=boot;\n"
+              "is_slot_device=1;\n"
+              "ramdisk_compression=auto;\n"
+              "patch_vbmeta_flag=auto;\n\n"
+              "## AnyKernel methods (DO NOT CHANGE)\n"
+              "# import patching functions/variables - see for reference\n"
+              ". tools/ak3-core.sh;\n\n"
+              "## AnyKernel boot install\n"
+              "split_boot;\n"
+              "flash_boot;\n"
+              "## end boot install\n"
+          )
+          with open("anykernel.sh", "w", encoding="utf-8", newline="\n") as f:
+              f.write(ak3_content)
+          PYEOF
 
-          properties() { '
-          kernel.string=Melt Kernel Full Security POCO F5 (marble)
-          do.devicecheck=0
-          do.modules=0
-          do.systemless=1
-          do.cleanup=1
-          do.cleanuponabort=0
-          device.name1=marble
-          device.name2=marblein
-          supported.versions=
-          supported.patchlevels=
-          '; }
+          if [ -f "../kernel/out/arch/arm64/boot/Image" ]; then
+            cp ../kernel/out/arch/arm64/boot/Image .
+          elif [ -f "../kernel/out/arch/arm64/boot/Image.gz" ]; then
+            cp ../kernel/out/arch/arm64/boot/Image.gz .
+          fi
 
-          block=boot;
-          is_slot_device=1;
-          ramdisk_compression=auto;
-          patch_vbmeta_flag=auto;
-
-          . tools/ak3-core.sh;
-
-          split_boot;
-          flash_boot;
-          EOF
-
-          cp ../kernel/out/arch/arm64/boot/Image .
-
-          cat << 'EOF' > marble_security_tune.sh
-          #!/system/bin/sh
+          # Cetak skrip marble_security_tune.sh rata kiri murni menggunakan Python
+          python3 - << 'PYEOF'
+          sec_script = """#!/system/bin/sh
           while [ "$(getprop sys.boot_completed)" != "1" ]; do
             sleep 3
           done
@@ -428,18 +459,21 @@ jobs:
             echo 1000 > "$gov/schedutil/up_rate_limit_us" 2>/dev/null
             echo 5000 > "$gov/schedutil/down_rate_limit_us" 2>/dev/null
           done
-          EOF
+          """
+          lines = [line.lstrip() for line in sec_script.splitlines()]
+          with open("marble_security_tune.sh", "w", encoding="utf-8", newline="\n") as f:
+              f.write("\n".join(lines) + "\n")
+          PYEOF
           chmod 0755 marble_security_tune.sh
 
           BUILD_DATE=$(date +"%Y%m%d-%H%M")
-          ZIP_NAME="Melt-Marble-CleanSync-${{ github.event.inputs.root_variant }}-SuSFS_${{ env.SUSFS_APPLIED }}-${BUILD_DATE}.zip"
+          ZIP_NAME="Melt-Marble-SapuJagat-${{ github.event.inputs.root_variant }}-SuSFS_${{ env.SUSFS_APPLIED }}-${BUILD_DATE}.zip"
           zip -r9 "../${ZIP_NAME}" * -x "*.git*"
           echo "ZIP_OUTPUT=${ZIP_NAME}" >> $GITHUB_ENV
 
       - name: Upload Artifact Flashable Kernel ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: Melt-Kernel-Marble-CleanSync-${{ github.event.inputs.root_variant }}
+          name: Melt-Kernel-Marble-SapuJagat-${{ github.event.inputs.root_variant }}
           path: ${{ env.ZIP_OUTPUT }}
           retention-days: 14
-          
