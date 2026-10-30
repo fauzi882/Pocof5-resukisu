@@ -518,7 +518,7 @@ jobs:
             LLVM_IAS=1 \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
-            KCFLAGS="-Wno-error -Wno-implicit-function-declaration -Wno-unused-function -Wno-strict-prototypes -Wno-old-style-declaration" \
+            KCFLAGS="-Wno-error -Wno-implicit-function-declaration -Wno-unused-function -Wno-strict-prototypes -Wno-out-of-line-declaration" \
             Image Image.gz 2>&1 | tee build_full.log
           BUILD_STATUS=${PIPESTATUS[0]}
           set -e
