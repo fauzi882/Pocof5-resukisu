@@ -74,10 +74,60 @@ jobs:
       - name: Setup Toolchain Clang
         run: |
           mkdir -p "$HOME/toolchains/clang"
-          wget -qO clang.tar.gz "${{ env.CLANG_URL }}"
-          tar -xzf clang.tar.gz -C "$HOME/toolchains/clang"
+          CLANG_INSTALLED=false
+
+          # ── source 1: googlesource (official, sering flaky) ──────────────────
+          echo ">>> Mencoba googlesource..."
+          if wget -q --timeout=120 --tries=2 -O clang.tar.gz "${{ env.CLANG_URL }}" 2>/dev/null; then
+            if tar -xzf clang.tar.gz -C "$HOME/toolchains/clang" 2>/dev/null; then
+              echo ">>> Clang dari googlesource OK"
+              CLANG_INSTALLED=true
+            fi
+          fi
           rm -f clang.tar.gz
+
+          # ── source 2: ZyCromerZ GitHub release (reliable mirror) ─────────────
+          if [ "$CLANG_INSTALLED" = "false" ]; then
+            echo ">>> googlesource gagal, mencoba ZyCromerZ clang-18..."
+            ZYC_URL="https://github.com/ZyCromerZ/Clang/releases/download/18.0.0git-20240302-release/Clang-18.0.0git-20240302.tar.gz"
+            if wget -q --timeout=180 --tries=2 -O clang.tar.gz "$ZYC_URL" 2>/dev/null; then
+              if tar -xzf clang.tar.gz -C "$HOME/toolchains/clang" 2>/dev/null; then
+                echo ">>> Clang dari ZyCromerZ OK"
+                CLANG_INSTALLED=true
+              fi
+            fi
+            rm -f clang.tar.gz
+          fi
+
+          # ── source 3: apt LLVM-17 (fallback pasti berhasil) ──────────────────
+          if [ "$CLANG_INSTALLED" = "false" ]; then
+            echo ">>> Semua download gagal, fallback ke apt LLVM-17..."
+            wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+              | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
+            echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-17 main" \
+              | sudo tee /etc/apt/sources.list.d/llvm.list >/dev/null
+            sudo apt-get update -qq
+            sudo apt-get install -y clang-17 lld-17 llvm-17
+            mkdir -p "$HOME/toolchains/clang/bin"
+            for tool in clang clang++ ld.lld llvm-ar llvm-nm \
+                        llvm-objcopy llvm-objdump llvm-readelf llvm-strip; do
+              if command -v "${tool}-17" >/dev/null 2>&1; then
+                ln -sf "$(command -v ${tool}-17)" "$HOME/toolchains/clang/bin/${tool}"
+              fi
+            done
+            # clang juga perlu alias tanpa suffix untuk CC=
+            ln -sf "$(command -v clang-17)" "$HOME/toolchains/clang/bin/clang" 2>/dev/null || true
+            echo ">>> apt LLVM-17 OK"
+            CLANG_INSTALLED=true
+          fi
+
+          if [ "$CLANG_INSTALLED" = "false" ]; then
+            echo "ERROR: semua sumber clang gagal"
+            exit 1
+          fi
+
           echo "$HOME/toolchains/clang/bin" >> $GITHUB_PATH
+          clang --version || "$HOME/toolchains/clang/bin/clang" --version || true
 
       - name: Clone Source Kernel Pzqqt
         run: |
