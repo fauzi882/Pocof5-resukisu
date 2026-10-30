@@ -14,7 +14,7 @@ on:
         default: true
         type: boolean
       security_level:
-        description: 'Level Keamanan (maximum_stealth menonaktifkan susfs log)'
+        description: 'Level Keamanan'
         required: true
         default: 'standard_secure'
         type: choice
@@ -71,7 +71,7 @@ jobs:
             python3 python3-pip rsync unzip wget xz-utils zip zstd \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi binutils-aarch64-linux-gnu
 
-      - name: Setup Direktori & Toolchain Clang/LLVM
+      - name: Setup Toolchain Clang
         run: |
           mkdir -p "$HOME/toolchains/clang"
           wget -qO clang.tar.gz "${{ env.CLANG_URL }}"
@@ -90,13 +90,11 @@ jobs:
         if: ${{ github.event.inputs.enable_susfs == 'true' }}
         run: |
           git clone --depth=1 -b "${{ env.SUSFS_BRANCH }}" "${{ env.SUSFS_REPO }}" susfs4ksu
-          echo ">>> SuSFS repo siap di branch ${{ env.SUSFS_BRANCH }}"
+          echo ">>> SuSFS repo siap"
 
       - name: Integrasi BakaSU
         run: |
           cd kernel
-
-          # Bersihkan integrasi root lama kalau ada
           rm -rf KernelSU drivers/kernelsu
           sed -i '/kernelsu/d' drivers/Makefile || true
           sed -i '/kernelsu/d' drivers/Kconfig || true
@@ -106,13 +104,11 @@ jobs:
           curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash -s main || \
           curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash
 
-          # Pastikan direktori BakaSU ada
           if [ ! -d "KernelSU" ] && [ ! -d "drivers/kernelsu" ]; then
             echo "ERROR: BakaSU gagal diintegrasikan"
             exit 1
           fi
 
-          # Sinkronisasi ke commit terbaru BakaSU
           if [ -d "KernelSU" ]; then
             cd KernelSU
             git config user.name "build-user"
@@ -130,175 +126,101 @@ jobs:
       - name: Sinkronisasi Versi BakaSU
         run: |
           cd kernel
-
           TARGET_VER="${{ github.event.inputs.ksu_version_override }}"
           if [ "$TARGET_VER" = "auto" ] || [ -z "$TARGET_VER" ]; then
             TARGET_VER="35252"
           fi
-
-          echo ">>> Target versi BakaSU: $TARGET_VER"
-
+          echo ">>> Target versi: $TARGET_VER"
           for kdir in KernelSU drivers/kernelsu; do
             if [ -d "$kdir" ]; then
               cd "$kdir"
               git config user.name "build-user" || true
               git config user.email "build-user@android" || true
-              # Set versi di semua Makefile/Kbuild
               find . -maxdepth 3 \( -name "Makefile" -o -name "Kbuild" -o -name "*.mk" \) | while read -r mf; do
                 sed -i "s/KSU_VERSION := .*/KSU_VERSION := ${TARGET_VER}/g" "$mf" || true
                 sed -i "s/^VERSION = .*/VERSION = ${TARGET_VER}/g" "$mf" || true
+                sed -i 's/-dirty//g' "$mf" || true
               done
               git add -A && git commit -m "version-sync-${TARGET_VER}" || true
               cd - >/dev/null
             fi
           done
-
-          # Suppress -dirty suffix
-          for kdir in KernelSU drivers/kernelsu; do
-            if [ -d "$kdir" ]; then
-              find "$kdir" -name "Makefile" -o -name "Kbuild" | while read -r mf; do
-                sed -i 's/-dirty//g' "$mf" || true
-              done
-            fi
-          done
-
           git add -A && git commit -m "clean-version" || true
 
-      - name: Integrasi SuSFS (Clean, No Fuzz)
+      - name: Integrasi SuSFS
         if: ${{ github.event.inputs.enable_susfs == 'true' }}
         run: |
           cd kernel
-
           SUSFS_OK="false"
-
           if [ -d "../susfs4ksu" ]; then
-            echo ">>> Menyalin file susfs ke kernel source..."
-
-            # Salin susfs source files
             cp -rv ../susfs4ksu/kernel_patches/fs/* fs/ || true
             cp -rv ../susfs4ksu/kernel_patches/include/linux/* include/linux/ || true
-
             PATCH_FILE="../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android12-5.10.patch"
-
             if [ ! -f "$PATCH_FILE" ]; then
-              echo "ERROR: File patch susfs tidak ditemukan"
-              SUSFS_OK="false"
+              echo "ERROR: File patch tidak ditemukan"
             else
-              echo ">>> Mencoba apply patch susfs tanpa fuzz..."
-
-              # Attempt 1: clean apply tanpa fuzz sama sekali
               if patch -p1 --dry-run < "$PATCH_FILE" >/dev/null 2>&1; then
                 patch -p1 --forward < "$PATCH_FILE"
                 SUSFS_OK="true"
-                echo ">>> SUSFS: Clean apply BERHASIL (zero fuzz)"
-
-              # Attempt 2: fuzz=1 minimal
+                echo ">>> SUSFS: clean apply berhasil"
               elif patch -p1 --dry-run --fuzz=1 < "$PATCH_FILE" >/dev/null 2>&1; then
                 patch -p1 --forward --fuzz=1 < "$PATCH_FILE"
                 SUSFS_OK="true"
-                echo ">>> SUSFS: Apply dengan fuzz=1 BERHASIL"
-
-              # Attempt 3: git apply 3way sebagai last resort
+                echo ">>> SUSFS: fuzz=1 berhasil"
               elif git apply --3way --check "$PATCH_FILE" >/dev/null 2>&1; then
                 git apply --3way "$PATCH_FILE"
                 SUSFS_OK="true"
-                echo ">>> SUSFS: git apply 3way BERHASIL"
-
+                echo ">>> SUSFS: 3way berhasil"
               else
-                echo ">>> SUSFS: Semua attempt gagal — susfs TIDAK diaplikasikan"
-                # Bersihkan file yang sudah dicopy
-                rm -f fs/susfs.c fs/sus_su.c
-                rm -f include/linux/susfs.h include/linux/susfs_def.h
+                echo ">>> SUSFS: semua attempt gagal"
+                rm -f fs/susfs.c fs/sus_su.c include/linux/susfs.h include/linux/susfs_def.h
                 SUSFS_OK="false"
               fi
             fi
-
             if [ "$SUSFS_OK" = "true" ]; then
-              # Suppress error menjadi warning di makefile KSU agar tidak break build
               find KernelSU drivers/kernelsu -name "*.mk" -o -name "Makefile" -o -name "Kbuild" 2>/dev/null | while read -r mkfile; do
                 sed -i 's/\$(error /\$(warning /g' "$mkfile" || true
               done
-
-              # Verifikasi hook tidak conflict dengan BakaSU
-              echo ">>> Verifikasi hook conflict..."
-              NAMESPACE_HOOKS=$(grep -c "ksu_\|sus_\|susfs_" fs/namespace.c 2>/dev/null || echo "0")
-              echo ">>> Hook count di namespace.c: $NAMESPACE_HOOKS"
-
-              EXEC_HOOKS=$(grep -c "ksu_\|sus_\|susfs_" fs/exec.c 2>/dev/null || echo "0")
-              echo ">>> Hook count di exec.c: $EXEC_HOOKS"
-
-              git add -A && git commit -m "susfs-applied-clean" || true
+              git add -A && git commit -m "susfs-applied" || true
             fi
-          else
-            echo ">>> susfs4ksu directory tidak ada — skip"
-            SUSFS_OK="false"
           fi
-
           echo "SUSFS_APPLIED=$SUSFS_OK" >> $GITHUB_ENV
 
-      - name: Verifikasi dan Bersihkan Extern Declarations
+      - name: Bersihkan Extern Declarations Problematic
         run: |
           cd kernel
-
-          echo ">>> Verifikasi extern declarations di fs/exec.c..."
-
-          # Cek apakah ada extern tanpa implementasi yang matching
-          # BakaSU punya implementasi sendiri — tidak butuh weak stub buatan
-          # Hapus kalau ada sisa weak stub dari build sebelumnya
-
           for f in fs/exec.c security/selinux/hooks.c security/selinux/selinuxfs.c; do
             if [ -f "$f" ]; then
-              # Hapus weak stub baris yang mungkin ter-inject
-              if grep -q "__attribute__.*weak.*ksu\|__attribute__.*weak.*my_" "$f" 2>/dev/null; then
-                echo ">>> Menemukan weak stub di $f — menghapus..."
-                # Hapus blok weak stub
-                sed -i '/Safe weak stubs for execveat preinit/,/^$/d' "$f" || true
-                sed -i '/True SELinux passthrough bridges/,/^$/d' "$f" || true
-                sed -i '/__attribute__.*weak.*ksu_/d' "$f" || true
-                sed -i '/__attribute__.*weak.*my_/d' "$f" || true
-                echo ">>> Weak stub di $f berhasil dihapus"
-              else
-                echo ">>> $f bersih — tidak ada weak stub"
-              fi
+              sed -i '/Safe weak stubs for execveat preinit/,/^$/d' "$f" || true
+              sed -i '/True SELinux passthrough bridges/,/^$/d' "$f" || true
+              sed -i '/__attribute__.*weak.*ksu_/d' "$f" || true
+              sed -i '/__attribute__.*weak.*my_/d' "$f" || true
             fi
           done
-
-          # Pastikan extern deklarasi yang orphan tidak ada
-          # Kalau ada extern tapi tidak ada body di file yang sama,
-          # dan BakaSU tidak provide implementasinya, hapus extern-nya
           for fn in ksu_setup_preinit_file ksu_preinit_handle_post_execveat; do
             if grep -q "extern.*${fn}" fs/exec.c 2>/dev/null; then
-              # Cek apakah ada implementasi (body) di mana saja di tree
               IMPL_COUNT=$(grep -rn "^[a-zA-Z].*${fn}.*{" fs/ kernel/ 2>/dev/null | grep -v "extern" | wc -l)
               if [ "$IMPL_COUNT" -eq 0 ]; then
-                echo ">>> $fn: extern ada tapi implementasi tidak ditemukan — hapus extern"
+                echo ">>> $fn: extern tanpa implementasi — dihapus"
                 sed -i "/extern.*${fn}/d" fs/exec.c || true
-              else
-                echo ">>> $fn: implementasi ditemukan ($IMPL_COUNT), extern aman"
               fi
             fi
           done
-
-          git add -A && git commit -m "clean-extern-declarations" || true
+          git add -A && git commit -m "clean-externs" || true
 
       - name: Patch BBR TCP
         run: |
           cd kernel
-
           if [ "${{ github.event.inputs.tcp_profile }}" = "bbr_plus_tuned" ] && [ -f "net/ipv4/tcp_bbr.c" ]; then
-            echo ">>> Menerapkan BBR tuning..."
             sed -i 's/static const u32 bbr_min_rtt_win_sec = 10;/static const u32 bbr_min_rtt_win_sec = 5;/g' net/ipv4/tcp_bbr.c || true
             sed -i 's/static const u32 bbr_probe_rtt_mode_ms = 200;/static const u32 bbr_probe_rtt_mode_ms = 100;/g' net/ipv4/tcp_bbr.c || true
-            echo ">>> BBR tuning selesai"
+            echo ">>> BBR tuning applied"
           fi
-
           git add -A && git commit -m "bbr-tuned" || true
 
       - name: Konfigurasi Defconfig
         run: |
           cd kernel
-
-          # Deteksi defconfig yang tersedia
           if [ -f "arch/arm64/configs/marble_defconfig" ]; then
             DEFCONFIG_NAME="marble_defconfig"
             DEFCONFIG_FILE="arch/arm64/configs/marble_defconfig"
@@ -309,82 +231,84 @@ jobs:
             DEFCONFIG_NAME="gki_defconfig"
             DEFCONFIG_FILE="arch/arm64/configs/gki_defconfig"
           fi
-
-          echo ">>> Menggunakan defconfig: $DEFCONFIG_NAME"
           echo "TARGET_DEFCONFIG=$DEFCONFIG_NAME" >> $GITHUB_ENV
+          echo ">>> Defconfig: $DEFCONFIG_NAME"
 
-          # Append konfigurasi kernel
-          cat << 'EOF' >> "$DEFCONFIG_FILE"
-CONFIG_WERROR=n
-CONFIG_KSU=y
-CONFIG_KPROBES=y
-CONFIG_HAVE_KPROBES=y
-CONFIG_KPROBE_EVENTS=y
-CONFIG_TCP_CONG_ADVANCED=y
-CONFIG_TCP_CONG_BBR=y
-CONFIG_DEFAULT_BBR=y
-CONFIG_DEFAULT_TCP_CONG="bbr"
-CONFIG_NET_SCH_FQ=y
-CONFIG_SYN_COOKIES=y
-CONFIG_SECURITY_DMESG_RESTRICT=y
-CONFIG_SECURITY_NETWORK=y
-CONFIG_SECURITY_SELINUX=y
-CONFIG_BPF_JIT_ALWAYS_ON=y
-EOF
+          python3 - "$DEFCONFIG_FILE" "${{ env.SUSFS_APPLIED }}" "${{ github.event.inputs.security_level }}" << 'PYEOF'
+          import sys
+          defconfig = sys.argv[1]
+          susfs_applied = sys.argv[2]
+          security_level = sys.argv[3]
 
-          # Config susfs berdasarkan hasil apply
-          if [ "${{ env.SUSFS_APPLIED }}" = "true" ]; then
-            echo ">>> SuSFS applied — menambah config susfs..."
-            cat << 'EOF' >> "$DEFCONFIG_FILE"
-CONFIG_KSU_SUSFS=y
-CONFIG_KSU_SUSFS_SUS_PATH=y
-CONFIG_KSU_SUSFS_SUS_MOUNT=y
-CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
-CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
-CONFIG_KSU_SUSFS_SUS_KSTAT=y
-CONFIG_KSU_SUSFS_TRY_UMOUNT=y
-CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y
-CONFIG_KSU_SUSFS_SPOOF_UNAME=y
-CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
-CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
-CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
-CONFIG_KSU_SUSFS_SUS_SU=n
-EOF
-            # Log control berdasarkan security level
-            if [ "${{ github.event.inputs.security_level }}" = "maximum_stealth" ]; then
-              echo "CONFIG_KSU_SUSFS_ENABLE_LOG=n" >> "$DEFCONFIG_FILE"
-              echo ">>> Maximum stealth: susfs log DISABLED"
-            else
-              echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> "$DEFCONFIG_FILE"
-              echo ">>> Standard secure: susfs log ENABLED (untuk debug)"
-            fi
-          else
-            echo "CONFIG_KSU_SUSFS=n" >> "$DEFCONFIG_FILE"
-            echo ">>> SuSFS tidak diaplikasikan — config diset n"
-          fi
+          base_configs = [
+              "CONFIG_WERROR=n",
+              "CONFIG_KSU=y",
+              "CONFIG_KPROBES=y",
+              "CONFIG_HAVE_KPROBES=y",
+              "CONFIG_KPROBE_EVENTS=y",
+              "CONFIG_TCP_CONG_ADVANCED=y",
+              "CONFIG_TCP_CONG_BBR=y",
+              "CONFIG_DEFAULT_BBR=y",
+              'CONFIG_DEFAULT_TCP_CONG="bbr"',
+              "CONFIG_NET_SCH_FQ=y",
+              "CONFIG_SYN_COOKIES=y",
+              "CONFIG_SECURITY_DMESG_RESTRICT=y",
+              "CONFIG_SECURITY_NETWORK=y",
+              "CONFIG_SECURITY_SELINUX=y",
+              "CONFIG_BPF_JIT_ALWAYS_ON=y",
+          ]
+
+          susfs_configs = [
+              "CONFIG_KSU_SUSFS=y",
+              "CONFIG_KSU_SUSFS_SUS_PATH=y",
+              "CONFIG_KSU_SUSFS_SUS_MOUNT=y",
+              "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y",
+              "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y",
+              "CONFIG_KSU_SUSFS_SUS_KSTAT=y",
+              "CONFIG_KSU_SUSFS_TRY_UMOUNT=y",
+              "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y",
+              "CONFIG_KSU_SUSFS_SPOOF_UNAME=y",
+              "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y",
+              "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y",
+              "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y",
+              "CONFIG_KSU_SUSFS_SUS_SU=n",
+          ]
+
+          with open(defconfig, "a", encoding="utf-8") as f:
+              f.write("\n")
+              for c in base_configs:
+                  f.write(c + "\n")
+              if susfs_applied == "true":
+                  for c in susfs_configs:
+                      f.write(c + "\n")
+                  if security_level == "maximum_stealth":
+                      f.write("CONFIG_KSU_SUSFS_ENABLE_LOG=n\n")
+                  else:
+                      f.write("CONFIG_KSU_SUSFS_ENABLE_LOG=y\n")
+              else:
+                  f.write("CONFIG_KSU_SUSFS=n\n")
+
+          print(">>> Defconfig updated OK")
+          PYEOF
 
           git add -A && git commit -m "defconfig-ready" || true
 
-      - name: Kompilasi Kernel Marble
+      - name: Kompilasi Kernel
         run: |
           cd kernel
-
           export KBUILD_BUILD_USER="build-user"
           export KBUILD_BUILD_HOST="build-host"
 
-          # Generate .config dari defconfig
           make O=out ARCH=arm64 \
             CC="ccache clang" \
             LLVM=1 \
             LLVM_IAS=1 \
             "${{ env.TARGET_DEFCONFIG }}"
 
-          # Merge marble vendor config kalau ada
           if [ -f "arch/arm64/configs/vendor/marble_GKI.config" ] && [ "${{ env.TARGET_DEFCONFIG }}" = "gki_defconfig" ]; then
             ./scripts/kconfig/merge_config.sh -m -O out out/.config arch/arm64/configs/vendor/marble_GKI.config
           fi
 
-          # Finalisasi config
           ./scripts/config --file out/.config \
             -d WERROR \
             -d CONFIG_WERROR \
@@ -394,7 +318,6 @@ EOF
 
           make O=out ARCH=arm64 CC="ccache clang" LLVM=1 LLVM_IAS=1 olddefconfig
 
-          # Build kernel
           set +e
           make -j$(nproc --all) \
             O=out \
@@ -410,11 +333,10 @@ EOF
           set -e
 
           if [ $BUILD_STATUS -ne 0 ]; then
-            echo ">>> BUILD GAGAL — Error log:"
-            grep -E "error:|fatal error:|undefined reference|undefined symbol|FAILED|\*\*\*.*Stop" build_full.log | tail -n 50 || true
+            echo ">>> BUILD GAGAL"
+            grep -E "error:|fatal error:|undefined reference|FAILED|\*\*\*.*Stop" build_full.log | tail -50 || true
             exit $BUILD_STATUS
           fi
-
           echo ">>> Build BERHASIL"
 
       - name: Paketkan ke AnyKernel3
@@ -423,129 +345,110 @@ EOF
           cd AnyKernel3
           rm -rf .git README.md modules patch ramdisk
 
-          # Buat anykernel.sh
-          cat > anykernel.sh << 'AKEOF'
-### AnyKernel3 Ramdisk Mod Script
-## osm0sis @ xda-developers
+          python3 - << 'PYEOF'
+          import os
 
-properties() { '
-kernel.string=Melt Kernel BakaSU Fixed POCO F5 (marble)
-do.devicecheck=0
-do.modules=0
-do.systemless=1
-do.cleanup=1
-do.cleanuponabort=0
-device.name1=marble
-device.name2=marblein
-supported.versions=
-supported.patchlevels=
-supported.vendorpatchlevels=
-'; } # end properties
+          ak3 = (
+              "### AnyKernel3 Ramdisk Mod Script\n"
+              "## osm0sis @ xda-developers\n\n"
+              "properties() { '\n"
+              "kernel.string=Melt Kernel BakaSU POCO F5 (marble)\n"
+              "do.devicecheck=0\n"
+              "do.modules=0\n"
+              "do.systemless=1\n"
+              "do.cleanup=1\n"
+              "do.cleanuponabort=0\n"
+              "device.name1=marble\n"
+              "device.name2=marblein\n"
+              "supported.versions=\n"
+              "supported.patchlevels=\n"
+              "supported.vendorpatchlevels=\n"
+              "'; } # end properties\n\n"
+              "### AnyKernel install\n"
+              "BLOCK=boot;\n"
+              "IS_SLOT_DEVICE=1;\n"
+              "RAMDISK_COMPRESSION=auto;\n"
+              "PATCH_VBMETA_FLAG=auto;\n\n"
+              "block=boot;\n"
+              "is_slot_device=1;\n"
+              "ramdisk_compression=auto;\n"
+              "patch_vbmeta_flag=auto;\n\n"
+              "## AnyKernel methods (DO NOT CHANGE)\n"
+              ". tools/ak3-core.sh;\n\n"
+              "## AnyKernel boot install\n"
+              "split_boot;\n"
+              "flash_boot;\n"
+              "## end boot install\n"
+          )
 
-### AnyKernel install
-BLOCK=boot;
-IS_SLOT_DEVICE=1;
-RAMDISK_COMPRESSION=auto;
-PATCH_VBMETA_FLAG=auto;
+          sec = "\n".join([
+              "#!/system/bin/sh",
+              "while [ \"$(getprop sys.boot_completed)\" != \"1\" ]; do sleep 3; done",
+              "echo 2 > /proc/sys/kernel/kptr_restrict 2>/dev/null",
+              "echo 1 > /proc/sys/kernel/dmesg_restrict 2>/dev/null",
+              "echo 3 > /proc/sys/kernel/perf_event_paranoid 2>/dev/null",
+              "echo 1 > /proc/sys/kernel/unprivileged_bpf_disabled 2>/dev/null",
+              "echo 2 > /proc/sys/kernel/randomize_va_space 2>/dev/null",
+              "echo 1 > /proc/sys/fs/protected_hardlinks 2>/dev/null",
+              "echo 1 > /proc/sys/fs/protected_symlinks 2>/dev/null",
+              "echo 0 > /proc/sys/kernel/sysrq 2>/dev/null",
+              "echo 1 > /proc/sys/net/ipv4/tcp_syncookies 2>/dev/null",
+              "echo 1 > /proc/sys/net/ipv4/tcp_rfc1337 2>/dev/null",
+              "echo 0 > /proc/sys/net/ipv4/tcp_timestamps 2>/dev/null",
+              "echo 1 > /proc/sys/net/ipv4/conf/all/rp_filter 2>/dev/null",
+              "echo 0 > /proc/sys/net/ipv4/conf/all/accept_redirects 2>/dev/null",
+              "echo 0 > /proc/sys/net/ipv4/conf/all/send_redirects 2>/dev/null",
+              "echo 0 > /proc/sys/net/ipv4/conf/all/accept_source_route 2>/dev/null",
+              "echo 0 > /proc/sys/net/ipv6/conf/all/accept_redirects 2>/dev/null",
+              "echo 1 > /proc/sys/net/ipv4/icmp_echo_ignore_broadcasts 2>/dev/null",
+              "echo 1 > /proc/sys/net/ipv4/icmp_ignore_bogus_error_responses 2>/dev/null",
+              "resetprop -n ro.boot.vbmeta.device_state locked",
+              "resetprop -n ro.boot.verifiedbootstate green",
+              "resetprop -n ro.boot.flash.locked 1",
+              "resetprop -n ro.boot.veritymode enforcing",
+              "resetprop -n ro.boot.warranty_bit 0",
+              "resetprop -n ro.warranty_bit 0",
+              "resetprop -n ro.debuggable 0",
+              "resetprop -n ro.secure 1",
+              "resetprop -n vendor.boot.vbmeta.device_state locked",
+              "resetprop -n vendor.boot.verifiedbootstate green",
+              "echo bbr > /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null",
+              "echo fq > /proc/sys/net/core/default_qdisc 2>/dev/null",
+              "echo 0 > /proc/sys/net/ipv4/tcp_slow_start_after_idle 2>/dev/null",
+              "resetprop -n persist.vendor.radio.add_power_save 0",
+              "resetprop -n persist.vendor.radio.apm_sim_not_pwdn 1",
+              "resetprop -n persist.vendor.radio.sib16_support 1",
+              "for gov in /sys/devices/system/cpu/cpufreq/policy*; do",
+              "  echo 1000 > \"$gov/schedutil/up_rate_limit_us\" 2>/dev/null",
+              "  echo 5000 > \"$gov/schedutil/down_rate_limit_us\" 2>/dev/null",
+              "done",
+              "",
+          ])
 
-block=boot;
-is_slot_device=1;
-ramdisk_compression=auto;
-patch_vbmeta_flag=auto;
+          with open("anykernel.sh", "w", encoding="utf-8", newline="\n") as f:
+              f.write(ak3)
 
-## AnyKernel methods (DO NOT CHANGE)
-. tools/ak3-core.sh;
+          with open("marble_security_tune.sh", "w", encoding="utf-8", newline="\n") as f:
+              f.write(sec)
 
-## AnyKernel boot install
-split_boot;
-flash_boot;
-## end boot install
-AKEOF
+          os.chmod("marble_security_tune.sh", 0o755)
+          print(">>> Files created OK")
+          PYEOF
 
-          # Copy kernel image
           if [ -f "../kernel/out/arch/arm64/boot/Image" ]; then
             cp ../kernel/out/arch/arm64/boot/Image .
-            echo ">>> Image berhasil dicopy"
           elif [ -f "../kernel/out/arch/arm64/boot/Image.gz" ]; then
             cp ../kernel/out/arch/arm64/boot/Image.gz .
-            echo ">>> Image.gz berhasil dicopy"
           else
-            echo "ERROR: Tidak ada kernel image ditemukan"
+            echo "ERROR: kernel image tidak ditemukan"
             exit 1
           fi
 
-          # Security tune script
-          cat > marble_security_tune.sh << 'SECEOF'
-#!/system/bin/sh
-while [ "$(getprop sys.boot_completed)" != "1" ]; do
-  sleep 3
-done
-
-# Kernel hardening
-echo 2 > /proc/sys/kernel/kptr_restrict 2>/dev/null
-echo 1 > /proc/sys/kernel/dmesg_restrict 2>/dev/null
-echo 3 > /proc/sys/kernel/perf_event_paranoid 2>/dev/null
-echo 1 > /proc/sys/kernel/unprivileged_bpf_disabled 2>/dev/null
-echo 2 > /proc/sys/kernel/randomize_va_space 2>/dev/null
-echo 1 > /proc/sys/fs/protected_hardlinks 2>/dev/null
-echo 1 > /proc/sys/fs/protected_symlinks 2>/dev/null
-echo 0 > /proc/sys/kernel/sysrq 2>/dev/null
-
-# Network hardening
-echo 1 > /proc/sys/net/ipv4/tcp_syncookies 2>/dev/null
-echo 1 > /proc/sys/net/ipv4/tcp_rfc1337 2>/dev/null
-echo 0 > /proc/sys/net/ipv4/tcp_timestamps 2>/dev/null
-echo 1 > /proc/sys/net/ipv4/conf/all/rp_filter 2>/dev/null
-echo 1 > /proc/sys/net/ipv4/conf/default/rp_filter 2>/dev/null
-echo 0 > /proc/sys/net/ipv4/conf/all/accept_redirects 2>/dev/null
-echo 0 > /proc/sys/net/ipv4/conf/default/accept_redirects 2>/dev/null
-echo 0 > /proc/sys/net/ipv4/conf/all/secure_redirects 2>/dev/null
-echo 0 > /proc/sys/net/ipv4/conf/all/send_redirects 2>/dev/null
-echo 0 > /proc/sys/net/ipv4/conf/all/accept_source_route 2>/dev/null
-echo 0 > /proc/sys/net/ipv6/conf/all/accept_redirects 2>/dev/null
-echo 0 > /proc/sys/net/ipv6/conf/default/accept_redirects 2>/dev/null
-echo 1 > /proc/sys/net/ipv4/icmp_echo_ignore_broadcasts 2>/dev/null
-echo 1 > /proc/sys/net/ipv4/icmp_ignore_bogus_error_responses 2>/dev/null
-
-# Spoof verified boot state
-resetprop -n ro.boot.vbmeta.device_state locked
-resetprop -n ro.boot.verifiedbootstate green
-resetprop -n ro.boot.flash.locked 1
-resetprop -n ro.boot.veritymode enforcing
-resetprop -n ro.boot.warranty_bit 0
-resetprop -n ro.warranty_bit 0
-resetprop -n ro.debuggable 0
-resetprop -n ro.secure 1
-resetprop -n vendor.boot.vbmeta.device_state locked
-resetprop -n vendor.boot.verifiedbootstate green
-
-# BBR TCP
-echo "bbr" > /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null
-echo "fq" > /proc/sys/net/core/default_qdisc 2>/dev/null
-echo 0 > /proc/sys/net/ipv4/tcp_slow_start_after_idle 2>/dev/null
-
-# Radio props
-resetprop -n persist.vendor.radio.add_power_save 0
-resetprop -n persist.vendor.radio.apm_sim_not_pwdn 1
-resetprop -n persist.vendor.radio.sib16_support 1
-resetprop -n persist.vendor.overlay.izat.optin rro
-resetprop -n persist.backup.ntpServer "0.id.pool.ntp.org"
-
-# CPU schedutil tuning
-for gov in /sys/devices/system/cpu/cpufreq/policy*; do
-  echo 1000 > "$gov/schedutil/up_rate_limit_us" 2>/dev/null
-  echo 5000 > "$gov/schedutil/down_rate_limit_us" 2>/dev/null
-done
-SECEOF
-
-          chmod 0755 marble_security_tune.sh
-
-          # Buat zip
           BUILD_DATE=$(date +"%Y%m%d-%H%M")
           ZIP_NAME="Melt-Marble-BakaSU-SuSFS_${{ env.SUSFS_APPLIED }}-${BUILD_DATE}.zip"
           zip -r9 "../${ZIP_NAME}" * -x "*.git*"
           echo "ZIP_OUTPUT=${ZIP_NAME}" >> $GITHUB_ENV
-          echo ">>> ZIP siap: ${ZIP_NAME}"
+          echo ">>> ZIP: ${ZIP_NAME}"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
@@ -553,3 +456,4 @@ SECEOF
           name: Melt-Kernel-Marble-BakaSU-Fixed
           path: ${{ env.ZIP_OUTPUT }}
           retention-days: 14
+ 
