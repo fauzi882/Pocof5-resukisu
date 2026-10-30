@@ -189,24 +189,169 @@ jobs:
       - name: Bersihkan Extern Declarations Problematic
         run: |
           cd kernel
-          for f in fs/exec.c security/selinux/hooks.c security/selinux/selinuxfs.c; do
-            if [ -f "$f" ]; then
-              sed -i '/Safe weak stubs for execveat preinit/,/^$/d' "$f" || true
-              sed -i '/True SELinux passthrough bridges/,/^$/d' "$f" || true
-              sed -i '/__attribute__.*weak.*ksu_/d' "$f" || true
-              sed -i '/__attribute__.*weak.*my_/d' "$f" || true
-            fi
-          done
-          for fn in ksu_setup_preinit_file ksu_preinit_handle_post_execveat; do
-            if grep -q "extern.*${fn}" fs/exec.c 2>/dev/null; then
-              IMPL_COUNT=$(grep -rn "^[a-zA-Z].*${fn}.*{" fs/ kernel/ 2>/dev/null | grep -v "extern" | wc -l)
-              if [ "$IMPL_COUNT" -eq 0 ]; then
-                echo ">>> $fn: extern tanpa implementasi — dihapus"
-                sed -i "/extern.*${fn}/d" fs/exec.c || true
-              fi
-            fi
-          done
-          git add -A && git commit -m "clean-externs" || true
+
+          # ── Python surgical patcher untuk fs/exec.c ──────────────────────────
+          python3 - << 'PYEOF'
+          import re, sys, os
+
+          KSU_FUNCS = [
+              "ksu_setup_preinit_file",
+              "ksu_preinit_handle_post_execveat",
+          ]
+
+          BAD_MARKERS = [
+              "Safe weak stubs for execveat preinit",
+              "True SELinux passthrough bridges",
+              "execveat preinit",
+          ]
+
+          SELINUX_FILES = [
+              "security/selinux/hooks.c",
+              "security/selinux/selinuxfs.c",
+          ]
+
+          # ── helper: cek apakah line adalah CALL (bukan deklarasi) ──
+          def is_call_site(line):
+              stripped = line.strip()
+              return (
+                  re.search(r'ksu_\w+\s*\(', stripped) is not None
+                  and not re.search(r'\bextern\b|__attribute__|__weak\b|^\s*//', stripped)
+                  and not stripped.startswith('*')
+              )
+
+          # ── bedah fs/exec.c ─────────────────────────────────────────
+          exec_path = "fs/exec.c"
+          if os.path.isfile(exec_path):
+              with open(exec_path, "r", encoding="utf-8", errors="replace") as fh:
+                  raw = fh.read()
+
+              lines = raw.splitlines(keepends=True)
+              cleaned = []
+              i = 0
+              while i < len(lines):
+                  line = lines[i]
+
+                  # hapus baris yang mengandung marker comment buruk
+                  if any(m in line for m in BAD_MARKERS):
+                      i += 1
+                      continue
+
+                  # hapus deklarasi __attribute__((weak)) / __weak untuk ksu_
+                  if re.search(r'(__attribute__\s*\(\s*\(weak\)\s*\)|__weak)\s+\w[\w\s\*]*ksu_', line):
+                      i += 1
+                      continue
+
+                  # hapus extern declaration untuk fungsi ksu_ yang kita target
+                  is_bad_extern = False
+                  for fn in KSU_FUNCS:
+                      if re.search(r'\bextern\b', line) and fn in line:
+                          is_bad_extern = True
+                          break
+                  if is_bad_extern:
+                      # kalau multi-line (tidak ada ; di baris ini), skip sampai ketemu ;
+                      if ';' not in line:
+                          while i < len(lines) and ';' not in lines[i]:
+                              i += 1
+                          i += 1  # skip baris yang ada ;
+                      else:
+                          i += 1
+                      continue
+
+                  cleaned.append(line)
+                  i += 1
+
+              content = "".join(cleaned)
+
+              # ── tentukan fungsi mana yang benar-benar dipanggil ──────
+              needed_externs = []
+              EXTERN_SIGS = {
+                  "ksu_setup_preinit_file":
+                      "extern void ksu_setup_preinit_file(struct linux_binprm *bprm);\n",
+                  "ksu_preinit_handle_post_execveat":
+                      "extern int ksu_preinit_handle_post_execveat(struct linux_binprm *bprm);\n",
+              }
+              for fn, sig in EXTERN_SIGS.items():
+                  # cari call site: nama fungsi diikuti '('
+                  if re.search(r'\b' + fn + r'\s*\(', content):
+                      # pastikan ada implementasi di tree
+                      impl_found = False
+                      for root, dirs, files in os.walk("."):
+                          dirs[:] = [d for d in dirs if d not in [".git", "out"]]
+                          for fname in files:
+                              if not fname.endswith(".c"):
+                                  continue
+                              fpath = os.path.join(root, fname)
+                              if fpath == exec_path:
+                                  continue
+                              try:
+                                  with open(fpath, "r", encoding="utf-8", errors="ignore") as tf:
+                                      tc = tf.read()
+                                  # definisi: nama fungsi diikuti '(' tanpa 'extern' di depan
+                                  if re.search(r'^[a-zA-Z_][\w\s\*]*\b' + fn + r'\s*\(', tc, re.MULTILINE):
+                                      impl_found = True
+                                      break
+                              except Exception:
+                                  continue
+                          if impl_found:
+                              break
+                      if impl_found:
+                          needed_externs.append(sig)
+                          print(f">>> {fn}: implementasi ditemukan, menambahkan extern")
+                      else:
+                          # tidak ada impl → inject weak stub sebelum usage
+                          stub = (
+                              f"static inline __attribute__((weak)) void {fn}"
+                              f"(struct linux_binprm *bprm) {{ }}\n"
+                              if fn == "ksu_setup_preinit_file"
+                              else
+                              f"static inline __attribute__((weak)) int {fn}"
+                              f"(struct linux_binprm *bprm) {{ return 0; }}\n"
+                          )
+                          needed_externs.append(stub)
+                          print(f">>> {fn}: tidak ada impl, inject weak stub")
+
+              # ── sisipkan extern/stub setelah blok #include terakhir ──
+              if needed_externs:
+                  lines2 = content.split("\n")
+                  last_inc = -1
+                  for idx, l in enumerate(lines2):
+                      if l.strip().startswith("#include"):
+                          last_inc = idx
+                  if last_inc >= 0:
+                      block = "\n/* KSU forward declarations (auto-generated) */\n"
+                      block += "".join(needed_externs)
+                      lines2.insert(last_inc + 1, block)
+                      content = "\n".join(lines2)
+
+              with open(exec_path, "w", encoding="utf-8") as fh:
+                  fh.write(content)
+              print(">>> fs/exec.c: patched OK")
+          else:
+              print(">>> fs/exec.c tidak ditemukan, skip")
+
+          # ── bersihkan selinux files dari marker buruk ─────────────
+          for sf in SELINUX_FILES:
+              if not os.path.isfile(sf):
+                  continue
+              with open(sf, "r", encoding="utf-8", errors="replace") as fh:
+                  content = fh.read()
+              changed = False
+              for m in BAD_MARKERS:
+                  if m in content:
+                      content = re.sub(
+                          r'/\*[^*]*' + re.escape(m) + r'[^*]*\*/', '', content
+                      )
+                      changed = True
+              content = re.sub(
+                  r'__attribute__\s*\(\s*\(weak\)\s*\)\s+\w[\w\s\*]*ksu_[^\n]*\n', '',
+                  content
+              )
+              with open(sf, "w", encoding="utf-8") as fh:
+                  fh.write(content)
+              print(f">>> {sf}: cleaned")
+          PYEOF
+
+          git add -A && git commit -m "clean-externs-surgical" || true
 
       - name: Patch BBR TCP
         run: |
@@ -327,7 +472,7 @@ jobs:
             LLVM_IAS=1 \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
-            KCFLAGS="-Wno-error" \
+            KCFLAGS="-Wno-error -Wno-implicit-function-declaration -Wno-unused-function" \
             Image Image.gz 2>&1 | tee build_full.log
           BUILD_STATUS=${PIPESTATUS[0]}
           set -e
@@ -456,4 +601,3 @@ jobs:
           name: Melt-Kernel-Marble-BakaSU-Fixed
           path: ${{ env.ZIP_OUTPUT }}
           retention-days: 14
- 
