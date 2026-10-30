@@ -190,19 +190,21 @@ jobs:
         run: |
           cd kernel
 
-          # ── Python surgical patcher untuk fs/exec.c ──────────────────────────
+          # ── Python surgical patcher v3 untuk fs/exec.c ──────────────────────
           python3 - << 'PYEOF'
-          import re, sys, os
+          import re, os
 
-          KSU_FUNCS = [
-              "ksu_setup_preinit_file",
-              "ksu_preinit_handle_post_execveat",
-          ]
+          # fungsi target dan return type-nya
+          KSU_FUNCS = {
+              "ksu_setup_preinit_file":           "void",
+              "ksu_preinit_handle_post_execveat": "int",
+          }
 
           BAD_MARKERS = [
               "Safe weak stubs for execveat preinit",
               "True SELinux passthrough bridges",
               "execveat preinit",
+              "KSU forward declarations (auto-generated)",
           ]
 
           SELINUX_FILES = [
@@ -210,144 +212,188 @@ jobs:
               "security/selinux/selinuxfs.c",
           ]
 
-          # ── helper: cek apakah line adalah CALL (bukan deklarasi) ──
-          def is_call_site(line):
-              stripped = line.strip()
-              return (
-                  re.search(r'ksu_\w+\s*\(', stripped) is not None
-                  and not re.search(r'\bextern\b|__attribute__|__weak\b|^\s*//', stripped)
-                  and not stripped.startswith('*')
+          # ── cari signature asli dari tree (.c dan .h) ────────────────────────
+          def find_real_signature(func_name):
+              """
+              Cari definisi atau deklarasi fungsi di seluruh tree.
+              Return (return_type_str, args_str, filepath) atau None.
+              Prioritas: .h declaration > .c definition
+              """
+              # pattern untuk definisi di .c:
+              # contoh: void ksu_setup_preinit_file(struct file *f, struct linux_binprm *b)
+              def_re = re.compile(
+                  r'(?:^|\n)[ \t]*(?:static\s+)?(?:inline\s+)?(?:__\w+\s+)*'
+                  r'(void|int|long|bool|unsigned\s+\w+|unsigned)\s*\*?\s*'
+                  + re.escape(func_name) +
+                  r'\s*\(([^)]+)\)\s*(?:\{|$)',
+                  re.MULTILINE
+              )
+              # pattern untuk extern di .h:
+              decl_re = re.compile(
+                  r'extern\s+(void|int|long|bool|unsigned\s+\w+|unsigned)\s*\*?\s*'
+                  + re.escape(func_name) +
+                  r'\s*\(([^;)]+)\)\s*;',
+                  re.MULTILINE
               )
 
-          # ── bedah fs/exec.c ─────────────────────────────────────────
-          exec_path = "fs/exec.c"
-          if os.path.isfile(exec_path):
-              with open(exec_path, "r", encoding="utf-8", errors="replace") as fh:
-                  raw = fh.read()
+              best_def  = None
+              best_decl = None
 
-              lines = raw.splitlines(keepends=True)
-              cleaned = []
-              i = 0
-              while i < len(lines):
-                  line = lines[i]
+              for root, dirs, files in os.walk('.'):
+                  dirs[:] = [d for d in dirs if d not in ['.git', 'out']]
+                  for fname in files:
+                      ext = os.path.splitext(fname)[1]
+                      if ext not in ('.c', '.h'):
+                          continue
+                      fpath = os.path.join(root, fname)
+                      # skip exec.c itself
+                      if os.path.abspath(fpath) == os.path.abspath('fs/exec.c'):
+                          continue
+                      try:
+                          with open(fpath, 'r', encoding='utf-8', errors='ignore') as f:
+                              src = f.read()
+                      except Exception:
+                          continue
 
-                  # hapus baris yang mengandung marker comment buruk
-                  if any(m in line for m in BAD_MARKERS):
-                      i += 1
-                      continue
+                      if ext == '.h' and best_decl is None:
+                          m = decl_re.search(src)
+                          if m:
+                              best_decl = (m.group(1).strip(), m.group(2).strip(), fpath)
 
-                  # hapus deklarasi __attribute__((weak)) / __weak untuk ksu_
-                  if re.search(r'(__attribute__\s*\(\s*\(weak\)\s*\)|__weak)\s+\w[\w\s\*]*ksu_', line):
-                      i += 1
-                      continue
+                      if ext == '.c' and best_def is None:
+                          m = def_re.search(src)
+                          if m:
+                              # jangan ambil kalau ada 'extern' sebelumnya di baris yang sama
+                              line_start = src.rfind('\n', 0, m.start()) + 1
+                              prefix = src[line_start:m.start()]
+                              if 'extern' not in prefix:
+                                  best_def = (m.group(1).strip(), m.group(2).strip(), fpath)
 
-                  # hapus extern declaration untuk fungsi ksu_ yang kita target
-                  is_bad_extern = False
-                  for fn in KSU_FUNCS:
-                      if re.search(r'\bextern\b', line) and fn in line:
-                          is_bad_extern = True
+                      if best_def and best_decl:
                           break
-                  if is_bad_extern:
-                      # kalau multi-line (tidak ada ; di baris ini), skip sampai ketemu ;
-                      if ';' not in line:
-                          while i < len(lines) and ';' not in lines[i]:
-                              i += 1
-                          i += 1  # skip baris yang ada ;
-                      else:
-                          i += 1
-                      continue
+                  if best_def and best_decl:
+                      break
 
-                  cleaned.append(line)
-                  i += 1
+              # prefer header declaration (lebih precise), fallback ke definition
+              return best_decl or best_def
 
-              content = "".join(cleaned)
-
-              # ── tentukan fungsi mana yang benar-benar dipanggil ──────
-              needed_externs = []
-              EXTERN_SIGS = {
-                  "ksu_setup_preinit_file":
-                      "extern void ksu_setup_preinit_file(struct linux_binprm *bprm);\n",
-                  "ksu_preinit_handle_post_execveat":
-                      "extern int ksu_preinit_handle_post_execveat(struct linux_binprm *bprm);\n",
-              }
-              for fn, sig in EXTERN_SIGS.items():
-                  # cari call site: nama fungsi diikuti '('
-                  if re.search(r'\b' + fn + r'\s*\(', content):
-                      # pastikan ada implementasi di tree
-                      impl_found = False
-                      for root, dirs, files in os.walk("."):
-                          dirs[:] = [d for d in dirs if d not in [".git", "out"]]
-                          for fname in files:
-                              if not fname.endswith(".c"):
-                                  continue
-                              fpath = os.path.join(root, fname)
-                              if fpath == exec_path:
-                                  continue
-                              try:
-                                  with open(fpath, "r", encoding="utf-8", errors="ignore") as tf:
-                                      tc = tf.read()
-                                  # definisi: nama fungsi diikuti '(' tanpa 'extern' di depan
-                                  if re.search(r'^[a-zA-Z_][\w\s\*]*\b' + fn + r'\s*\(', tc, re.MULTILINE):
-                                      impl_found = True
-                                      break
-                              except Exception:
-                                  continue
-                          if impl_found:
-                              break
-                      if impl_found:
-                          needed_externs.append(sig)
-                          print(f">>> {fn}: implementasi ditemukan, menambahkan extern")
-                      else:
-                          # tidak ada impl → inject weak stub sebelum usage
-                          stub = (
-                              f"static inline __attribute__((weak)) void {fn}"
-                              f"(struct linux_binprm *bprm) {{ }}\n"
-                              if fn == "ksu_setup_preinit_file"
-                              else
-                              f"static inline __attribute__((weak)) int {fn}"
-                              f"(struct linux_binprm *bprm) {{ return 0; }}\n"
-                          )
-                          needed_externs.append(stub)
-                          print(f">>> {fn}: tidak ada impl, inject weak stub")
-
-              # ── sisipkan extern/stub setelah blok #include terakhir ──
-              if needed_externs:
-                  lines2 = content.split("\n")
-                  last_inc = -1
-                  for idx, l in enumerate(lines2):
-                      if l.strip().startswith("#include"):
-                          last_inc = idx
-                  if last_inc >= 0:
-                      block = "\n/* KSU forward declarations (auto-generated) */\n"
-                      block += "".join(needed_externs)
-                      lines2.insert(last_inc + 1, block)
-                      content = "\n".join(lines2)
-
-              with open(exec_path, "w", encoding="utf-8") as fh:
-                  fh.write(content)
-              print(">>> fs/exec.c: patched OK")
-          else:
+          # ── bersihkan exec.c ─────────────────────────────────────────────────
+          exec_path = 'fs/exec.c'
+          if not os.path.isfile(exec_path):
               print(">>> fs/exec.c tidak ditemukan, skip")
+              exit(0)
 
-          # ── bersihkan selinux files dari marker buruk ─────────────
+          with open(exec_path, 'r', encoding='utf-8', errors='replace') as f:
+              raw = f.read()
+
+          lines = raw.splitlines(keepends=True)
+          out   = []
+          i     = 0
+          while i < len(lines):
+              line = lines[i]
+
+              # hapus baris marker buruk
+              if any(m in line for m in BAD_MARKERS):
+                  i += 1
+                  continue
+
+              # hapus __attribute__((weak)) / __weak stub untuk ksu_
+              if re.search(r'(__attribute__\s*\(\s*\(weak\)\s*\)|__weak)\s[\w\s\*]*ksu_', line):
+                  # kalau ini pembuka block {, skip sampai tutup }
+                  if '{' in line:
+                      depth = line.count('{') - line.count('}')
+                      i += 1
+                      while i < len(lines) and depth > 0:
+                          depth += lines[i].count('{') - lines[i].count('}')
+                          i += 1
+                  else:
+                      i += 1
+                  continue
+
+              # hapus extern / static ksu_ target (termasuk multi-line)
+              is_bad = False
+              for fn in KSU_FUNCS:
+                  if fn in line and re.search(r'\b(extern|static)\b', line):
+                      is_bad = True
+                      break
+              if is_bad:
+                  if ';' in line or ('{' in line and '}' in line):
+                      i += 1
+                  elif '{' in line:
+                      # skip sampai tutup block
+                      depth = line.count('{') - line.count('}')
+                      i += 1
+                      while i < len(lines) and depth > 0:
+                          depth += lines[i].count('{') - lines[i].count('}')
+                          i += 1
+                  else:
+                      # deklarasi yang tidak ada ; di baris ini, skip sampai ;
+                      i += 1
+                      while i < len(lines) and ';' not in lines[i]:
+                          i += 1
+                      i += 1  # skip baris ;
+                  continue
+
+              out.append(line)
+              i += 1
+
+          content = ''.join(out)
+
+          # buang blok auto-generated dari run sebelumnya kalau masih tersisa
+          content = re.sub(
+              r'\n/\* KSU forward declarations \(auto-generated\) \*/\n.*?(?=\n#|\nstatic|\nextern|\nvoid|\nint|\n\n)',
+              '\n', content, flags=re.DOTALL
+          )
+
+          # ── inject extern yang benar ─────────────────────────────────────────
+          injections = []
+          for fn, ret_default in KSU_FUNCS.items():
+              if not re.search(r'\b' + fn + r'\s*\(', content):
+                  print(f">>> {fn}: tidak dipanggil di exec.c, skip")
+                  continue
+
+              found = find_real_signature(fn)
+              if found:
+                  ret, args, src_path = found
+                  decl = f"extern {ret} {fn}({args});\n"
+                  print(f">>> {fn}: signature dari {src_path} → {decl.strip()}")
+              else:
+                  # fallback: old-style C declaration tanpa prototype
+                  # compiler tidak cek jumlah/tipe argumen → aman untuk call site apapun
+                  decl = f"extern {ret_default} {fn}();\n"
+                  print(f">>> {fn}: tidak ditemukan di tree, pakai old-style extern")
+
+              injections.append(decl)
+
+          if injections:
+              # sisipkan setelah #include terakhir
+              lines2     = content.split('\n')
+              last_inc   = -1
+              for idx, l in enumerate(lines2):
+                  if l.strip().startswith('#include'):
+                      last_inc = idx
+              if last_inc >= 0:
+                  block = '\n/* KSU forward declarations (auto-generated) */\n' + ''.join(injections)
+                  lines2.insert(last_inc + 1, block)
+                  content = '\n'.join(lines2)
+
+          with open(exec_path, 'w', encoding='utf-8') as f:
+              f.write(content)
+          print(">>> fs/exec.c: surgical patch v3 selesai")
+
+          # ── bersihkan selinux files ──────────────────────────────────────────
           for sf in SELINUX_FILES:
               if not os.path.isfile(sf):
                   continue
-              with open(sf, "r", encoding="utf-8", errors="replace") as fh:
-                  content = fh.read()
-              changed = False
+              with open(sf, 'r', encoding='utf-8', errors='replace') as f:
+                  src = f.read()
               for m in BAD_MARKERS:
-                  if m in content:
-                      content = re.sub(
-                          r'/\*[^*]*' + re.escape(m) + r'[^*]*\*/', '', content
-                      )
-                      changed = True
-              content = re.sub(
-                  r'__attribute__\s*\(\s*\(weak\)\s*\)\s+\w[\w\s\*]*ksu_[^\n]*\n', '',
-                  content
+                  src = re.sub(r'/\*[^*]*' + re.escape(m) + r'[^*]*\*/', '', src)
+              src = re.sub(
+                  r'__attribute__\s*\(\s*\(weak\)\s*\)\s[\w\s\*]*ksu_[^\n]*\n', '', src
               )
-              with open(sf, "w", encoding="utf-8") as fh:
-                  fh.write(content)
+              with open(sf, 'w', encoding='utf-8') as f:
+                  f.write(src)
               print(f">>> {sf}: cleaned")
           PYEOF
 
@@ -472,7 +518,7 @@ jobs:
             LLVM_IAS=1 \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
-            KCFLAGS="-Wno-error -Wno-implicit-function-declaration -Wno-unused-function" \
+            KCFLAGS="-Wno-error -Wno-implicit-function-declaration -Wno-unused-function -Wno-strict-prototypes -Wno-old-style-declaration" \
             Image Image.gz 2>&1 | tee build_full.log
           BUILD_STATUS=${PIPESTATUS[0]}
           set -e
