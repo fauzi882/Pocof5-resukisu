@@ -366,22 +366,39 @@ jobs:
               src = open("net/ipv4/tcp_bbr.c", encoding="utf-8").read()
 
               if "bbr2" not in src:
-                  # find the existing module_init call and inject before it
-                  bbr2_addon = """
-          /* BBR2 alias - registered alongside BBR1 in same module */
+                  # Dynamically extract the existing BBR1 ops struct fields
+                  # so we only use fields that actually exist in this kernel version
+                  bbr1_struct = re.search(
+                      r'static\s+struct\s+tcp_congestion_ops\s+tcp_bbr_cong_ops\s*[^=]*=\s*\{([^}]+)\}',
+                      src, re.DOTALL
+                  )
+                  if bbr1_struct:
+                      fields_raw = bbr1_struct.group(1)
+                      # Replace .name value only, keep all other fields as-is
+                      fields_bbr2 = re.sub(
+                          r'(\.name\s*=\s*)"bbr"',
+                          r'\1"bbr2"',
+                          fields_raw
+                      )
+                      bbr2_addon = f"""
+          /* BBR2 alias - same as BBR1 with different name */
+          static struct tcp_congestion_ops tcp_bbr2_ops __read_mostly = {{{fields_bbr2}}};
+          """
+                  else:
+                      # Fallback: minimal safe struct with only guaranteed fields
+                      bbr2_addon = """
+          /* BBR2 alias - minimal safe definition */
           static struct tcp_congestion_ops tcp_bbr2_ops __read_mostly = {
-              .flags         = TCP_CONG_NON_RESTRICTED,
-              .name          = "bbr2",
-              .owner         = THIS_MODULE,
-              .init          = bbr_init,
-              .cong_control  = bbr_main,
-              .sndbuf_expand = bbr_sndbuf_expand,
-              .undo_cwnd     = bbr_undo_cwnd,
-              .cwnd_event    = bbr_cwnd_event,
-              .ssthresh      = bbr_ssthresh,
-              .tso_segs      = bbr_tso_segs,
-              .get_info      = bbr_get_info,
-              .set_state     = bbr_set_state,
+              .flags        = TCP_CONG_NON_RESTRICTED,
+              .name         = "bbr2",
+              .owner        = THIS_MODULE,
+              .init         = bbr_init,
+              .cong_control = bbr_main,
+              .undo_cwnd    = bbr_undo_cwnd,
+              .cwnd_event   = bbr_cwnd_event,
+              .ssthresh     = bbr_ssthresh,
+              .get_info     = bbr_get_info,
+              .set_state    = bbr_set_state,
           };
           """
                   # inject before module_init
