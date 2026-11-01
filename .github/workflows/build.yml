@@ -572,26 +572,154 @@ jobs:
       - name: Patch CPU Performance & Stability
         run: |
           cd kernel
-          [ -f "kernel/sched/cpufreq_schedutil.c" ] && {
-            sed -i "s/up_rate_limit_us = [0-9]*/up_rate_limit_us = 500/g" kernel/sched/cpufreq_schedutil.c || true
-            sed -i "s/down_rate_limit_us = [0-9]*/down_rate_limit_us = 2000/g" kernel/sched/cpufreq_schedutil.c || true
-          }
-          [ -f "kernel/sched/fair.c" ] && sed -i "s/6000000ULL/4000000ULL/g" kernel/sched/fair.c || true
-          [ -f "mm/vmscan.c" ] && sed -i "s/vm_swappiness = 60/vm_swappiness = 100/g" mm/vmscan.c || true
-          [ -f "block/mq-deadline.c" ] && sed -i "s/dd->fifo_batch = [0-9]*/dd->fifo_batch = 8/g" block/mq-deadline.c || true
+          if [ -f "kernel/sched/cpufreq_schedutil.c" ]; then
+            python3 - kernel/sched/cpufreq_schedutil.c << 'PYEOF'
+          import re, sys
+          path = sys.argv[1]
+          with open(path, encoding="utf-8", errors="replace") as f:
+              src = f.read()
+          # Only patch the DEFAULT VALUE assignments inside struct definitions
+          # not macro/attribute lines - safe regex targeting initializer only
+          src = re.sub(
+              r'(\.up_rate_limit_us\s*=\s*USEC_PER_MSEC\s*\*\s*)\d+',
+              r'\g<1>1',
+              src
+          )
+          src = re.sub(
+              r'(\.down_rate_limit_us\s*=\s*USEC_PER_MSEC\s*\*\s*)\d+',
+              r'\g<1>2',
+              src
+          )
+          # Also patch static const defaults if present (not in __ATTR_RW)
+          src = re.sub(
+              r'(?<!ATTR)(up_rate_limit_us\s*=\s*)(\d+)(\s*;)',
+              r'\g<1>500\g<3>',
+              src
+          )
+          src = re.sub(
+              r'(?<!ATTR)(down_rate_limit_us\s*=\s*)(\d+)(\s*;)',
+              r'\g<1>2000\g<3>',
+              src
+          )
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(src)
+          print(">>> schedutil: rate limits tuned safely")
+          PYEOF
+          fi
+          # fair.c - tune sched latency (safe string replace)
+          if [ -f "kernel/sched/fair.c" ]; then
+            python3 - kernel/sched/fair.c << 'PYEOF'
+          import re, sys
+          path = sys.argv[1]
+          with open(path, encoding="utf-8", errors="replace") as f:
+              src = f.read()
+          # Only replace the sched_latency_ns default value assignment
+          src = re.sub(
+              r'(sched_latency_ns\s*=\s*)6000000ULL',
+              r'\g<1>4000000ULL',
+              src
+          )
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(src)
+          print(">>> fair.c: sched_latency_ns tuned")
+          PYEOF
+          fi
+          # vmscan.c - tune swappiness default
+          if [ -f "mm/vmscan.c" ]; then
+            python3 - mm/vmscan.c << 'PYEOF'
+          import re, sys
+          path = sys.argv[1]
+          with open(path, encoding="utf-8", errors="replace") as f:
+              src = f.read()
+          src = re.sub(
+              r'(vm_swappiness\s*=\s*)60(\s*[;,])',
+              r'\g<1>100\g<2>',
+              src
+          )
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(src)
+          print(">>> vmscan.c: swappiness tuned")
+          PYEOF
+          fi
+          # mq-deadline - tune fifo_batch
+          if [ -f "block/mq-deadline.c" ]; then
+            python3 - block/mq-deadline.c << 'PYEOF'
+          import re, sys
+          path = sys.argv[1]
+          with open(path, encoding="utf-8", errors="replace") as f:
+              src = f.read()
+          src = re.sub(
+              r'(dd->fifo_batch\s*=\s*)\d+(\s*[;,])',
+              r'\g<1>8\g<2>',
+              src
+          )
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(src)
+          print(">>> mq-deadline.c: fifo_batch tuned")
+          PYEOF
+          fi
           git add -A && git commit -m "perf-tuning" || true
 
       - name: Patch GPS Signal Dolby
         run: |
           cd kernel
-          for f in drivers/tty/serial/msm_geni_serial.c drivers/tty/serial/qcom_geni_serial.c; do
-            [ -f "$f" ] && sed -i "s/msecs_to_jiffies([0-9]\+)/msecs_to_jiffies(500)/g" "$f" || true
+          # GPS: patch UART timeout safely
+          for f in drivers/tty/serial/msm_geni_serial.c drivers/tty/serial/qcom_geni_serial.c \
+                   drivers/gnss/gnss_serial.c; do
+            [ -f "$f" ] || continue
+            python3 - "$f" << 'PYEOF'
+          import re, sys
+          path = sys.argv[1]
+          with open(path, encoding="utf-8", errors="replace") as f:
+              src = f.read()
+          # Only patch small timeout values (< 200ms) to avoid breaking large ones
+          def safe_timeout(m):
+              val = int(m.group(1))
+              return f"msecs_to_jiffies(500)" if val < 200 else m.group(0)
+          src = re.sub(r'msecs_to_jiffies\((\d+)\)', safe_timeout, src)
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(src)
+          print(f">>> {path}: GPS timeout patched")
+          PYEOF
           done
+          # Audio: patch QDSP6 timeout safely
           for f in sound/soc/qcom/qdsp6/q6asm.c sound/soc/qcom/qdsp6/q6afe.c; do
-            [ -f "$f" ] && sed -i "s/TIMEOUT_MS [0-9]*/TIMEOUT_MS 5000/g" "$f" || true
+            [ -f "$f" ] || continue
+            python3 - "$f" << 'PYEOF'
+          import re, sys
+          path = sys.argv[1]
+          with open(path, encoding="utf-8", errors="replace") as f:
+              src = f.read()
+          # Only patch #define TIMEOUT_MS lines
+          src = re.sub(
+              r'(#define\s+\w*TIMEOUT\w*\s+)(\d+)',
+              lambda m: m.group(1) + "5000" if int(m.group(2)) < 5000 else m.group(0),
+              src
+          )
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(src)
+          print(f">>> {path}: audio timeout patched")
+          PYEOF
           done
-          for f in drivers/net/wireless/ath/ath11k/mac.c drivers/net/wireless/ath/ath10k/mac.c; do
-            [ -f "$f" ] && sed -i "s/ATH_MAX_POWER_LEVEL [0-9]*/ATH_MAX_POWER_LEVEL 60/g" "$f" || true
+          # Signal: patch WiFi TX power safely
+          for f in drivers/net/wireless/ath/ath11k/mac.c \
+                   drivers/net/wireless/ath/ath10k/mac.c; do
+            [ -f "$f" ] || continue
+            python3 - "$f" << 'PYEOF'
+          import re, sys
+          path = sys.argv[1]
+          with open(path, encoding="utf-8", errors="replace") as f:
+              src = f.read()
+          # Only patch #define ATH_MAX_POWER_LEVEL lines
+          src = re.sub(
+              r'(#define\s+ATH_MAX_POWER_LEVEL\s+)\d+',
+              r'\g<1>60',
+              src
+          )
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(src)
+          print(f">>> {path}: TX power patched")
+          PYEOF
           done
           git add -A && git commit -m "gps-signal-dolby" || true
 
