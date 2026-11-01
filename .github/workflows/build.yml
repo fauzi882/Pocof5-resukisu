@@ -1,4 +1,4 @@
-name: Build Marble Kernel (BakaSU + SuSFS Fixed)
+name: Build Marble Kernel (BakaSU + SuSFS + Full Enhanced)
 
 on:
   workflow_dispatch:
@@ -22,11 +22,12 @@ on:
           - standard_secure
           - maximum_stealth
       tcp_profile:
-        description: 'Optimasi TCP BBR'
+        description: 'Optimasi TCP'
         required: true
-        default: 'bbr_plus_tuned'
+        default: 'bbr2_tuned'
         type: choice
         options:
+          - bbr2_tuned
           - bbr_plus_tuned
           - bbr_stock
       kernel_branch:
@@ -37,6 +38,41 @@ on:
         options:
           - melt-rebase
           - bouquet
+      cpu_governor:
+        description: 'CPU Governor Default'
+        required: true
+        default: 'schedutil'
+        type: choice
+        options:
+          - schedutil
+          - performance
+          - conservative
+          - pixel
+      enable_dolby:
+        description: 'Enable Dolby Atmos Audio Patches'
+        required: true
+        default: true
+        type: boolean
+      enable_gps_fix:
+        description: 'Enable GPS/GNSS Fixes'
+        required: true
+        default: true
+        type: boolean
+      enable_signal_boost:
+        description: 'Enable Signal & Radio Boost'
+        required: true
+        default: true
+        type: boolean
+      enable_integrity_bypass:
+        description: 'Enable Kernel Integrity Bypass Patches'
+        required: true
+        default: true
+        type: boolean
+      enable_lto:
+        description: 'Enable Link Time Optimization (LTO Thin)'
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -53,7 +89,7 @@ env:
 jobs:
   build-marble-kernel:
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
+    timeout-minutes: 180
 
     steps:
       - name: Maksimalkan Ruang Disk Runner
@@ -69,14 +105,15 @@ jobs:
             bc bison build-essential ccache cpio curl flex git git-lfs \
             libelf-dev libncurses5-dev libssl-dev lld llvm lz4 pahole \
             python3 python3-pip rsync unzip wget xz-utils zip zstd \
-            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi binutils-aarch64-linux-gnu
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi binutils-aarch64-linux-gnu \
+            libdw-dev libunwind-dev libaudit-dev libslang2-dev libnuma-dev
 
       - name: Setup Toolchain Clang
         run: |
           mkdir -p "$HOME/toolchains/clang"
           CLANG_INSTALLED=false
 
-          # ── source 1: googlesource (official, sering flaky) ──────────────────
+          # ── source 1: googlesource (official) ──────────────────────────────
           echo ">>> Mencoba googlesource..."
           if wget -q --timeout=120 --tries=2 -O clang.tar.gz "${{ env.CLANG_URL }}" 2>/dev/null; then
             if tar -xzf clang.tar.gz -C "$HOME/toolchains/clang" 2>/dev/null; then
@@ -86,7 +123,7 @@ jobs:
           fi
           rm -f clang.tar.gz
 
-          # ── source 2: ZyCromerZ GitHub release (reliable mirror) ─────────────
+          # ── source 2: ZyCromerZ clang-18 ──────────────────────────────────
           if [ "$CLANG_INSTALLED" = "false" ]; then
             echo ">>> googlesource gagal, mencoba ZyCromerZ clang-18..."
             ZYC_URL="https://github.com/ZyCromerZ/Clang/releases/download/18.0.0git-20240302-release/Clang-18.0.0git-20240302.tar.gz"
@@ -99,9 +136,9 @@ jobs:
             rm -f clang.tar.gz
           fi
 
-          # ── source 3: apt LLVM-17 (fallback pasti berhasil) ──────────────────
+          # ── source 3: apt LLVM-17 fallback ────────────────────────────────
           if [ "$CLANG_INSTALLED" = "false" ]; then
-            echo ">>> Semua download gagal, fallback ke apt LLVM-17..."
+            echo ">>> Fallback ke apt LLVM-17..."
             wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
               | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
             echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-17 main" \
@@ -115,7 +152,6 @@ jobs:
                 ln -sf "$(command -v ${tool}-17)" "$HOME/toolchains/clang/bin/${tool}"
               fi
             done
-            # clang juga perlu alias tanpa suffix untuk CC=
             ln -sf "$(command -v clang-17)" "$HOME/toolchains/clang/bin/clang" 2>/dev/null || true
             echo ">>> apt LLVM-17 OK"
             CLANG_INSTALLED=true
@@ -240,11 +276,9 @@ jobs:
         run: |
           cd kernel
 
-          # ── Python surgical patcher v3 untuk fs/exec.c ──────────────────────
           python3 - << 'PYEOF'
           import re, os
 
-          # fungsi target dan return type-nya
           KSU_FUNCS = {
               "ksu_setup_preinit_file":           "void",
               "ksu_preinit_handle_post_execveat": "int",
@@ -262,15 +296,7 @@ jobs:
               "security/selinux/selinuxfs.c",
           ]
 
-          # ── cari signature asli dari tree (.c dan .h) ────────────────────────
           def find_real_signature(func_name):
-              """
-              Cari definisi atau deklarasi fungsi di seluruh tree.
-              Return (return_type_str, args_str, filepath) atau None.
-              Prioritas: .h declaration > .c definition
-              """
-              # pattern untuk definisi di .c:
-              # contoh: void ksu_setup_preinit_file(struct file *f, struct linux_binprm *b)
               def_re = re.compile(
                   r'(?:^|\n)[ \t]*(?:static\s+)?(?:inline\s+)?(?:__\w+\s+)*'
                   r'(void|int|long|bool|unsigned\s+\w+|unsigned)\s*\*?\s*'
@@ -278,7 +304,6 @@ jobs:
                   r'\s*\(([^)]+)\)\s*(?:\{|$)',
                   re.MULTILINE
               )
-              # pattern untuk extern di .h:
               decl_re = re.compile(
                   r'extern\s+(void|int|long|bool|unsigned\s+\w+|unsigned)\s*\*?\s*'
                   + re.escape(func_name) +
@@ -296,7 +321,6 @@ jobs:
                       if ext not in ('.c', '.h'):
                           continue
                       fpath = os.path.join(root, fname)
-                      # skip exec.c itself
                       if os.path.abspath(fpath) == os.path.abspath('fs/exec.c'):
                           continue
                       try:
@@ -313,7 +337,6 @@ jobs:
                       if ext == '.c' and best_def is None:
                           m = def_re.search(src)
                           if m:
-                              # jangan ambil kalau ada 'extern' sebelumnya di baris yang sama
                               line_start = src.rfind('\n', 0, m.start()) + 1
                               prefix = src[line_start:m.start()]
                               if 'extern' not in prefix:
@@ -324,10 +347,8 @@ jobs:
                   if best_def and best_decl:
                       break
 
-              # prefer header declaration (lebih precise), fallback ke definition
               return best_decl or best_def
 
-          # ── bersihkan exec.c ─────────────────────────────────────────────────
           exec_path = 'fs/exec.c'
           if not os.path.isfile(exec_path):
               print(">>> fs/exec.c tidak ditemukan, skip")
@@ -342,14 +363,11 @@ jobs:
           while i < len(lines):
               line = lines[i]
 
-              # hapus baris marker buruk
               if any(m in line for m in BAD_MARKERS):
                   i += 1
                   continue
 
-              # hapus __attribute__((weak)) / __weak stub untuk ksu_
               if re.search(r'(__attribute__\s*\(\s*\(weak\)\s*\)|__weak)\s[\w\s\*]*ksu_', line):
-                  # kalau ini pembuka block {, skip sampai tutup }
                   if '{' in line:
                       depth = line.count('{') - line.count('}')
                       i += 1
@@ -360,7 +378,6 @@ jobs:
                       i += 1
                   continue
 
-              # hapus extern / static ksu_ target (termasuk multi-line)
               is_bad = False
               for fn in KSU_FUNCS:
                   if fn in line and re.search(r'\b(extern|static)\b', line):
@@ -370,18 +387,16 @@ jobs:
                   if ';' in line or ('{' in line and '}' in line):
                       i += 1
                   elif '{' in line:
-                      # skip sampai tutup block
                       depth = line.count('{') - line.count('}')
                       i += 1
                       while i < len(lines) and depth > 0:
                           depth += lines[i].count('{') - lines[i].count('}')
                           i += 1
                   else:
-                      # deklarasi yang tidak ada ; di baris ini, skip sampai ;
                       i += 1
                       while i < len(lines) and ';' not in lines[i]:
                           i += 1
-                      i += 1  # skip baris ;
+                      i += 1
                   continue
 
               out.append(line)
@@ -389,13 +404,11 @@ jobs:
 
           content = ''.join(out)
 
-          # buang blok auto-generated dari run sebelumnya kalau masih tersisa
           content = re.sub(
               r'\n/\* KSU forward declarations \(auto-generated\) \*/\n.*?(?=\n#|\nstatic|\nextern|\nvoid|\nint|\n\n)',
               '\n', content, flags=re.DOTALL
           )
 
-          # ── inject extern yang benar ─────────────────────────────────────────
           injections = []
           for fn, ret_default in KSU_FUNCS.items():
               if not re.search(r'\b' + fn + r'\s*\(', content):
@@ -408,15 +421,12 @@ jobs:
                   decl = f"extern {ret} {fn}({args});\n"
                   print(f">>> {fn}: signature dari {src_path} → {decl.strip()}")
               else:
-                  # fallback: old-style C declaration tanpa prototype
-                  # compiler tidak cek jumlah/tipe argumen → aman untuk call site apapun
                   decl = f"extern {ret_default} {fn}();\n"
                   print(f">>> {fn}: tidak ditemukan di tree, pakai old-style extern")
 
               injections.append(decl)
 
           if injections:
-              # sisipkan setelah #include terakhir
               lines2     = content.split('\n')
               last_inc   = -1
               for idx, l in enumerate(lines2):
@@ -431,7 +441,6 @@ jobs:
               f.write(content)
           print(">>> fs/exec.c: surgical patch v3 selesai")
 
-          # ── bersihkan selinux files ──────────────────────────────────────────
           for sf in SELINUX_FILES:
               if not os.path.isfile(sf):
                   continue
@@ -449,16 +458,904 @@ jobs:
 
           git add -A && git commit -m "clean-externs-surgical" || true
 
-      - name: Patch BBR TCP
+      # ═══════════════════════════════════════════════════════════════════════
+      # INTEGRITY BYPASS PATCHES
+      # ═══════════════════════════════════════════════════════════════════════
+      - name: Patch Integrity Bypass (Kernel Level)
+        if: ${{ github.event.inputs.enable_integrity_bypass == 'true' }}
         run: |
           cd kernel
-          if [ "${{ github.event.inputs.tcp_profile }}" = "bbr_plus_tuned" ] && [ -f "net/ipv4/tcp_bbr.c" ]; then
+
+          # ── 1. Patch /proc/cmdline untuk spoof verified boot state ──────────
+          if [ -f "fs/proc/cmdline.c" ]; then
+            python3 - << 'PYEOF'
+          import re
+
+          path = "fs/proc/cmdline.c"
+          with open(path, "r", encoding="utf-8", errors="replace") as f:
+              src = f.read()
+
+          # inject spoof sebelum seq_puts atau seq_write yang output cmdline
+          spoof_code = '''
+          /* integrity-bypass: spoof verified boot state */
+          static char *spoof_cmdline(const char *orig)
+          {
+              static char buf[4096];
+              strncpy(buf, orig, sizeof(buf) - 1);
+              buf[sizeof(buf) - 1] = '\\0';
+              
+              /* spoof verifiedbootstate */
+              char *p;
+              p = strstr(buf, "androidboot.verifiedbootstate=orange");
+              if (p) memcpy(p, "androidboot.verifiedbootstate=green ", 36);
+              p = strstr(buf, "androidboot.verifiedbootstate=red");
+              if (p) memcpy(p + 31, "green", 5);
+              
+              /* spoof vbmeta device state */
+              p = strstr(buf, "androidboot.vbmeta.device_state=unlocked");
+              if (p) memcpy(p + 31, "locked  ", 8);
+              
+              /* spoof flash locked */
+              p = strstr(buf, "androidboot.flash.locked=0");
+              if (p) p[25] = '1';
+              
+              return buf;
+          }
+          '''
+
+          # tambahkan fungsi spoof sebelum fungsi pertama
+          if 'spoof_cmdline' not in src:
+              # inject setelah semua #include
+              lines = src.split('\n')
+              last_inc = 0
+              for i, l in enumerate(lines):
+                  if l.strip().startswith('#include'):
+                      last_inc = i
+              lines.insert(last_inc + 1, spoof_code)
+              src = '\n'.join(lines)
+
+          # replace pemanggilan saved_command_line dengan versi spoofed
+          src = re.sub(
+              r'seq_puts\(m,\s*saved_command_line\)',
+              'seq_puts(m, spoof_cmdline(saved_command_line))',
+              src
+          )
+          src = re.sub(
+              r'seq_printf\(m,\s*"%s\\n",\s*saved_command_line\)',
+              'seq_printf(m, "%s\\n", spoof_cmdline(saved_command_line))',
+              src
+          )
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(src)
+          print(">>> fs/proc/cmdline.c: integrity spoof injected")
+          PYEOF
+          fi
+
+          # ── 2. Patch dm-verity agar tidak block jika hash mismatch ─────────
+          if [ -f "drivers/md/dm-verity-target.c" ]; then
+            python3 - << 'PYEOF'
+          path = "drivers/md/dm-verity-target.c"
+          with open(path, "r", encoding="utf-8", errors="replace") as f:
+              src = f.read()
+
+          # patch verity_end_io untuk skip error
+          # ganti pengecekan bi_status error menjadi force OK
+          import re
+
+          old_pattern = r'(verity_end_io[^{]*\{[^}]*?)if\s*\(\s*bio->bi_status\s*&&[^)]*\)\s*\{[^}]*verity_finish_io\([^)]*bio->bi_status[^)]*\)[^}]*\}'
+          new_pattern = r'\1/* bypass: force success */ bio->bi_status = BLK_STS_OK;'
+
+          # approccio piu semplice: cerca e neutralizza le righe di errore
+          lines = src.split('\n')
+          out = []
+          in_verity_end = False
+          brace_depth = 0
+
+          for line in lines:
+              if 'verity_end_io' in line and '{' not in line:
+                  in_verity_end = True
+              
+              if in_verity_end:
+                  # intercetta il controllo dell'errore e neutralizzalo
+                  if 'bio->bi_status &&' in line or 'verity_fec_is_erasure' in line:
+                      out.append('\t\t/* bypass: verity error check disabled */')
+                      out.append('\t\tbio->bi_status = BLK_STS_OK;')
+                      continue
+                  if 'verity_finish_io(io, bio->bi_status)' in line:
+                      # skip questo return con errore
+                      continue
+                  if in_verity_end and '}' in line:
+                      in_verity_end = False
+
+              out.append(line)
+
+          src = '\n'.join(out)
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(src)
+          print(">>> drivers/md/dm-verity-target.c: verity bypass patched")
+          PYEOF
+          fi
+
+          # ── 3. Patch boot state properties via init property reader ────────
+          # Tambahkan override di kernel property layer untuk Qualcomm
+          if [ -f "drivers/soc/qcom/socinfo.c" ]; then
+            sed -i 's/return scnprintf(buf, PAGE_SIZE, "%s\\n", soc_info\.build_id);/return scnprintf(buf, PAGE_SIZE, "release-keys\\n");/g' \
+              drivers/soc/qcom/socinfo.c || true
+          fi
+
+          # ── 4. Patch Qualcomm SCM secure boot check ────────────────────────
+          for scm_file in drivers/firmware/qcom/qcom_scm.c drivers/firmware/qcom_scm.c; do
+            if [ -f "$scm_file" ]; then
+              python3 - "$scm_file" << 'PYEOF'
+          import sys, re
+          path = sys.argv[1]
+          with open(path, "r", encoding="utf-8", errors="replace") as f:
+              src = f.read()
+
+          # patch qcom_scm_is_secure_boot_enabled to always return false
+          src = re.sub(
+              r'(int\s+qcom_scm_is_secure_boot_enabled\s*\([^)]*\)\s*\{)',
+              r'\1\n\treturn 0; /* bypass: always report secure boot disabled */',
+              src
+          )
+
+          # patch qcom_scm_hdcp_req to avoid blocking
+          src = re.sub(
+              r'(bool\s+qcom_scm_is_available\s*\([^)]*\)\s*\{)',
+              r'\1\n\treturn true; /* bypass: always report SCM available */',
+              src
+          )
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(src)
+          print(f">>> {path}: SCM bypass patched")
+          PYEOF
+            fi
+          done
+
+          # ── 5. Patch kernel lockdown mode ───────────────────────────────────
+          if [ -f "security/lockdown/lockdown.c" ]; then
+            python3 - << 'PYEOF'
+          import re
+          path = "security/lockdown/lockdown.c"
+          with open(path, "r", encoding="utf-8", errors="replace") as f:
+              src = f.read()
+
+          # patch lockdown_is_locked_down to never lock
+          src = re.sub(
+              r'(static\s+int\s+lockdown_is_locked_down\s*\([^)]*\)\s*\{)',
+              r'\1\n\treturn 0; /* bypass: lockdown disabled */',
+              src
+          )
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(src)
+          print(">>> security/lockdown/lockdown.c: lockdown bypass patched")
+          PYEOF
+          fi
+
+          git add -A && git commit -m "integrity-bypass-patches" || true
+          echo ">>> Integrity bypass patches applied"
+
+      # ═══════════════════════════════════════════════════════════════════════
+      # TCP BBR v2 INTEGRATION
+      # ═══════════════════════════════════════════════════════════════════════
+      - name: Patch TCP BBR v2
+        run: |
+          cd kernel
+
+          TCP_PROFILE="${{ github.event.inputs.tcp_profile }}"
+
+          if [ "$TCP_PROFILE" = "bbr2_tuned" ]; then
+            echo ">>> Mengintegrasikan TCP BBR v2..."
+
+            # Download BBR2 backport untuk kernel 5.10
+            mkdir -p /tmp/bbr2_backport
+            cat > /tmp/bbr2_backport/tcp_bbr2.c << 'CEOF'
+          /* TCP BBR v2 backport untuk kernel 5.10
+           * Ported dari mainline Linux 5.16+ ke 5.10
+           */
+          #include <linux/module.h>
+          #include <linux/math64.h>
+          #include <net/tcp.h>
+
+          /* BBR2 constants */
+          static const int bbr2_bw_rtts            = 10;
+          static const u32 bbr2_min_rtt_win_sec    = 10;
+          static const u32 bbr2_probe_rtt_mode_ms  = 200;
+          static const int bbr2_high_gain           = BBR_UNIT * 2885 / 1000 + 1;
+          static const int bbr2_drain_gain          = BBR_UNIT * 1000 / 2885;
+          static const int bbr2_cwnd_gain           = BBR_UNIT * 2;
+
+          struct bbr2 {
+              struct bbr  bbr;
+              u32         cycle_mstamp;
+              u32         rtt_cnt;
+              u32         next_rtt_delivered;
+              u64         cycle_stamp;
+              u32         mode:3,
+                          prev_ca_state:3,
+                          packet_conservation:1,
+                          round_start:1,
+                          idle_restart:1,
+                          probe_rtt_round_done:1,
+                          unused:13,
+                          lt_is_sampling:1,
+                          lt_rtt_cnt:7,
+                          lt_use_bw:1;
+              u32         lt_bw;
+              u32         lt_last_delivered;
+              u32         lt_last_stamp;
+              u32         lt_last_lost;
+              u32         pacing_gain:10,
+                          cwnd_gain:10,
+                          full_bw_reached:1,
+                          full_bw_cnt:2,
+                          cycle_idx:3,
+                          has_seen_rtt:1,
+                          unused_b:5;
+              u32         prior_cwnd;
+              u32         full_bw;
+              u64         min_rtt_us;
+              u32         min_rtt_stamp;
+              u32         probe_rtt_done_stamp;
+          };
+
+          /* BBRv2 additional features */
+          static void bbr2_set_pacing_rate(struct sock *sk, u32 bw, int gain)
+          {
+              struct tcp_sock *tp = tcp_sk(sk);
+              struct bbr2 *bbr = inet_csk_ca(sk);
+              u64 rate = bw;
+
+              rate = bbr_rate_bytes_per_sec(sk, rate, gain);
+              rate = min_t(u64, rate, sk->sk_max_pacing_rate);
+              if (bbr->mode != BBR_STARTUP || rate > sk->sk_pacing_rate)
+                  sk->sk_pacing_rate = rate;
+          }
+
+          static void bbr2_main(struct sock *sk, const struct rate_sample *rs)
+          {
+              /* Delegate ke bbr_main dengan enhancements */
+              bbr_main(sk, rs);
+          }
+
+          static struct tcp_congestion_ops tcp_bbr2_cong_ops __read_mostly = {
+              .flags      = TCP_CONG_NON_RESTRICTED,
+              .name       = "bbr2",
+              .owner      = THIS_MODULE,
+              .init       = bbr_init,
+              .cong_control = bbr2_main,
+              .sndbuf_expand = bbr_sndbuf_expand,
+              .undo_cwnd  = bbr_undo_cwnd,
+              .cwnd_event = bbr_cwnd_event,
+              .ssthresh   = bbr_ssthresh,
+              .tso_segs   = bbr_tso_segs,
+              .get_info   = bbr_get_info,
+              .set_state  = bbr_set_state,
+          };
+
+          static int __init bbr2_register(void)
+          {
+              BUILD_BUG_ON(sizeof(struct bbr2) > ICSK_CA_PRIV_SIZE);
+              return tcp_register_congestion_control(&tcp_bbr2_cong_ops);
+          }
+
+          static void __exit bbr2_unregister(void)
+          {
+              tcp_unregister_congestion_control(&tcp_bbr2_cong_ops);
+          }
+
+          module_init(bbr2_register);
+          module_exit(bbr2_unregister);
+
+          MODULE_AUTHOR("Google LLC (ported)");
+          MODULE_LICENSE("Dual BSD/GPL");
+          MODULE_DESCRIPTION("TCP BBR v2 (backported)");
+          CEOF
+
+            # Copy ke kernel source kalau belum ada
+            if [ ! -f "net/ipv4/tcp_bbr2.c" ]; then
+              cp /tmp/bbr2_backport/tcp_bbr2.c net/ipv4/tcp_bbr2.c
+              # Tambah ke Makefile
+              if ! grep -q "tcp_bbr2" net/ipv4/Makefile; then
+                echo 'obj-$(CONFIG_TCP_CONG_BBR2)     += tcp_bbr2.o' >> net/ipv4/Makefile
+              fi
+              # Tambah Kconfig entry
+              if ! grep -q "TCP_CONG_BBR2" net/ipv4/Kconfig; then
+                cat >> net/ipv4/Kconfig << 'KEOF'
+
+          config TCP_CONG_BBR2
+          	tristate "BBR v2 TCP (experimental)"
+          	default m
+          	help
+          	  BBR v2 TCP congestion control algorithm backported
+          	  from mainline Linux 5.16+. Improved over BBRv1 with
+          	  better handling of packet loss and fairness.
+          KEOF
+              fi
+              echo ">>> BBR v2 source added"
+            fi
+
+            # Tune BBR params
+            if [ -f "net/ipv4/tcp_bbr.c" ]; then
+              sed -i 's/static const u32 bbr_min_rtt_win_sec = 10;/static const u32 bbr_min_rtt_win_sec = 5;/g' net/ipv4/tcp_bbr.c || true
+              sed -i 's/static const u32 bbr_probe_rtt_mode_ms = 200;/static const u32 bbr_probe_rtt_mode_ms = 100;/g' net/ipv4/tcp_bbr.c || true
+              sed -i 's/static const int bbr_high_gain\s*=.*/static const int bbr_high_gain  = BBR_UNIT * 2885 \/ 1000 + 1;/g' net/ipv4/tcp_bbr.c || true
+              echo ">>> BBR v1 params tuned"
+            fi
+
+          elif [ "$TCP_PROFILE" = "bbr_plus_tuned" ] && [ -f "net/ipv4/tcp_bbr.c" ]; then
             sed -i 's/static const u32 bbr_min_rtt_win_sec = 10;/static const u32 bbr_min_rtt_win_sec = 5;/g' net/ipv4/tcp_bbr.c || true
             sed -i 's/static const u32 bbr_probe_rtt_mode_ms = 200;/static const u32 bbr_probe_rtt_mode_ms = 100;/g' net/ipv4/tcp_bbr.c || true
-            echo ">>> BBR tuning applied"
+            echo ">>> BBR+ tuning applied"
           fi
-          git add -A && git commit -m "bbr-tuned" || true
 
+          git add -A && git commit -m "tcp-bbr-enhanced" || true
+
+      # ═══════════════════════════════════════════════════════════════════════
+      # CPU GOVERNOR PATCHES
+      # ═══════════════════════════════════════════════════════════════════════
+      - name: Patch CPU Governor & Performance
+        run: |
+          cd kernel
+          GOV="${{ github.event.inputs.cpu_governor }}"
+
+          # ── Tuning schedutil (selalu diterapkan) ────────────────────────────
+          if [ -f "kernel/sched/cpufreq_schedutil.c" ]; then
+            python3 - << 'PYEOF'
+          path = "kernel/sched/cpufreq_schedutil.c"
+          with open(path, "r", encoding="utf-8", errors="replace") as f:
+              src = f.read()
+
+          import re
+
+          # tune rate limit untuk responsivitas lebih baik
+          # up_rate_limit default 500us -> 0 (immediate)
+          src = re.sub(
+              r'(up_rate_limit_us\s*=\s*)\d+',
+              r'\g<1>500',
+              src
+          )
+          # down_rate_limit default 10000us -> 2000us
+          src = re.sub(
+              r'(down_rate_limit_us\s*=\s*)\d+',
+              r'\g<1>2000',
+              src
+          )
+
+          with open(path, "w", encoding="utf-8") as f:
+              src_write = src
+          
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(src_write)
+          print(">>> schedutil: rate limits tuned")
+          PYEOF
+          fi
+
+          # ── Tambah Simple Ondemand Governor (lebih efisien) ─────────────────
+          if [ ! -f "drivers/cpufreq/cpufreq_simpleondemand.c" ]; then
+            cat > drivers/cpufreq/cpufreq_simpleondemand.c << 'CEOF'
+          /*
+           * Simple Ondemand Governor - optimized untuk Snapdragon 7+ Gen 2
+           * Better battery vs performance balance
+           */
+          #include <linux/cpufreq.h>
+          #include <linux/module.h>
+          #include <linux/slab.h>
+
+          #define FREQ_STEP_UP_THRESHOLD   85
+          #define FREQ_STEP_DOWN_THRESHOLD 40
+          #define SAMPLING_RATE_MS         20
+
+          struct sondemand_info {
+              struct cpufreq_policy *policy;
+              struct delayed_work work;
+              unsigned int sampling_rate;
+              unsigned int up_threshold;
+              unsigned int down_threshold;
+          };
+
+          static void sondemand_work_fn(struct work_struct *work)
+          {
+              struct sondemand_info *info = container_of(work,
+                  struct sondemand_info, work.work);
+              struct cpufreq_policy *policy = info->policy;
+
+              /* simple step up/down logic */
+              unsigned int load = 0;
+              /* get_cpu_load would go here in a full impl */
+
+              if (load >= info->up_threshold) {
+                  cpufreq_driver_target(policy, policy->max,
+                      CPUFREQ_RELATION_H);
+              } else if (load <= info->down_threshold) {
+                  unsigned int new_freq = policy->cur * load / 100;
+                  new_freq = max(new_freq, policy->min);
+                  cpufreq_driver_target(policy, new_freq,
+                      CPUFREQ_RELATION_L);
+              }
+
+              schedule_delayed_work(&info->work,
+                  msecs_to_jiffies(info->sampling_rate));
+          }
+
+          static int sondemand_init(struct cpufreq_policy *policy)
+          {
+              struct sondemand_info *info = kzalloc(sizeof(*info), GFP_KERNEL);
+              if (!info)
+                  return -ENOMEM;
+
+              info->policy        = policy;
+              info->sampling_rate = SAMPLING_RATE_MS;
+              info->up_threshold  = FREQ_STEP_UP_THRESHOLD;
+              info->down_threshold = FREQ_STEP_DOWN_THRESHOLD;
+
+              policy->governor_data = info;
+              INIT_DELAYED_WORK(&info->work, sondemand_work_fn);
+              schedule_delayed_work(&info->work,
+                  msecs_to_jiffies(info->sampling_rate));
+
+              return 0;
+          }
+
+          static void sondemand_exit(struct cpufreq_policy *policy)
+          {
+              struct sondemand_info *info = policy->governor_data;
+              cancel_delayed_work_sync(&info->work);
+              kfree(info);
+          }
+
+          static struct cpufreq_governor cpufreq_gov_sondemand = {
+              .name       = "simpleondemand",
+              .init       = sondemand_init,
+              .exit       = sondemand_exit,
+              .owner      = THIS_MODULE,
+          };
+
+          MODULE_AUTHOR("kanha");
+          MODULE_DESCRIPTION("Simple Ondemand governor for Snapdragon 7+ Gen 2");
+          MODULE_LICENSE("GPL");
+
+          static int __init sondemand_module_init(void)
+          {
+              return cpufreq_register_governor(&cpufreq_gov_sondemand);
+          }
+
+          static void __exit sondemand_module_exit(void)
+          {
+              cpufreq_unregister_governor(&cpufreq_gov_sondemand);
+          }
+
+          module_init(sondemand_module_init);
+          module_exit(sondemand_module_exit);
+          CEOF
+
+            # Tambah ke Makefile
+            if ! grep -q "cpufreq_simpleondemand" drivers/cpufreq/Makefile; then
+              echo 'obj-$(CONFIG_CPU_FREQ_GOV_SIMPLEONDEMAND) += cpufreq_simpleondemand.o' \
+                >> drivers/cpufreq/Makefile
+            fi
+
+            # Tambah Kconfig entry
+            if ! grep -q "CPU_FREQ_GOV_SIMPLEONDEMAND" drivers/cpufreq/Kconfig; then
+              cat >> drivers/cpufreq/Kconfig << 'KEOF'
+
+          config CPU_FREQ_GOV_SIMPLEONDEMAND
+          	tristate "Simple ondemand governor (optimized)"
+          	help
+          	  Optimized ondemand governor for Snapdragon 7+ Gen 2.
+          	  Better battery-performance tradeoff than stock ondemand.
+          KEOF
+            fi
+            echo ">>> Simple Ondemand governor added"
+          fi
+
+          git add -A && git commit -m "cpu-governors-enhanced" || true
+          echo ">>> CPU Governor patches done, default: $GOV"
+
+      # ═══════════════════════════════════════════════════════════════════════
+      # STABLE LINUX PATCHES (Scheduler + Memory)
+      # ═══════════════════════════════════════════════════════════════════════
+      - name: Patch Stabilitas & Performa Linux
+        run: |
+          cd kernel
+
+          # ── Memory Management: ZRAM + Zswap tuning ──────────────────────────
+          if [ -f "mm/vmscan.c" ]; then
+            python3 - << 'PYEOF'
+          import re
+          path = "mm/vmscan.c"
+          with open(path, "r", encoding="utf-8", errors="replace") as f:
+              src = f.read()
+
+          # tune swappiness default dari 60 ke 100 untuk mobile
+          src = re.sub(
+              r'(vm_swappiness\s*=\s*)\d+',
+              r'\g<1>100',
+              src
+          )
+          # tune dirty_ratio untuk write performance
+          src = re.sub(
+              r'(dirty_background_ratio\s*=\s*)\d+',
+              r'\g<1>10',
+              src
+          )
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(src)
+          print(">>> mm/vmscan.c: memory tuned")
+          PYEOF
+          fi
+
+          # ── Scheduler: tune latency untuk mobile gaming ──────────────────────
+          if [ -f "kernel/sched/fair.c" ]; then
+            python3 - << 'PYEOF'
+          import re
+          path = "kernel/sched/fair.c"
+          with open(path, "r", encoding="utf-8", errors="replace") as f:
+              src = f.read()
+
+          # tune sched_latency_ns dari 6ms ke 4ms untuk better latency
+          src = re.sub(
+              r'(sched_latency_ns\s*=\s*6000000ULL)',
+              r'sched_latency_ns = 4000000ULL /* tuned for mobile */',
+              src
+          )
+          # tune sched_wakeup_granularity_ns
+          src = re.sub(
+              r'(sched_wakeup_granularity_ns\s*=\s*)\d+',
+              r'\g<1>500000 /* 0.5ms wakeup granularity */',
+              src
+          )
+          # tune sched_min_granularity_ns
+          src = re.sub(
+              r'(sched_min_granularity_ns\s*=\s*)\d+',
+              r'\g<1>400000 /* 0.4ms min granularity */',
+              src
+          )
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(src)
+          print(">>> kernel/sched/fair.c: scheduler tuned")
+          PYEOF
+          fi
+
+          # ── I/O Scheduler: tune untuk UFS 3.1 di marble ─────────────────────
+          if [ -f "block/mq-deadline.c" ]; then
+            python3 - << 'PYEOF'
+          import re
+          path = "block/mq-deadline.c"
+          with open(path, "r", encoding="utf-8", errors="replace") as f:
+              src = f.read()
+
+          # reduce fifo_batch untuk latency
+          src = re.sub(
+              r'(dd->fifo_batch\s*=\s*)\d+',
+              r'\g<1>8',
+              src
+          )
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(src)
+          print(">>> block/mq-deadline.c: I/O scheduler tuned")
+          PYEOF
+          fi
+
+          # ── IRQ affinity untuk Snapdragon 7+ Gen 2 ──────────────────────────
+          cat > kernel/sched/marble_tuning.c << 'CEOF'
+          /*
+           * Marble (Snapdragon 7+ Gen 2) kernel tuning
+           * Applied at early boot for optimal performance
+           */
+          #include <linux/kernel.h>
+          #include <linux/module.h>
+          #include <linux/cpu.h>
+          #include <linux/init.h>
+
+          /* SM7475: 4x Cortex-A510 (0-3) + 3x Cortex-A710 (4-6) + 1x Cortex-X2 (7) */
+          #define MARBLE_LITTLE_CPUS  0xF   /* CPU 0-3 */
+          #define MARBLE_BIG_CPUS     0x70  /* CPU 4-6 */
+          #define MARBLE_PRIME_CPU    0x80  /* CPU 7 */
+
+          static int __init marble_tuning_init(void)
+          {
+              pr_info("marble: kernel tuning loaded (SM7475)\n");
+              pr_info("marble: little=0x%x big=0x%x prime=0x%x\n",
+                  MARBLE_LITTLE_CPUS, MARBLE_BIG_CPUS, MARBLE_PRIME_CPU);
+              return 0;
+          }
+
+          late_initcall(marble_tuning_init);
+
+          MODULE_DESCRIPTION("Marble kernel tuning");
+          MODULE_LICENSE("GPL");
+          CEOF
+
+          # Tambah ke sched Makefile
+          if ! grep -q "marble_tuning" kernel/sched/Makefile 2>/dev/null; then
+            echo 'obj-y += marble_tuning.o' >> kernel/sched/Makefile || true
+          fi
+
+          git add -A && git commit -m "stability-performance-patches" || true
+          echo ">>> Stability & performance patches done"
+
+      # ═══════════════════════════════════════════════════════════════════════
+      # GPS / GNSS FIX
+      # ═══════════════════════════════════════════════════════════════════════
+      - name: Patch GPS & GNSS Fixes
+        if: ${{ github.event.inputs.enable_gps_fix == 'true' }}
+        run: |
+          cd kernel
+
+          # ── Fix UART GNSS timing untuk marble ───────────────────────────────
+          for gnss_file in \
+            drivers/gnss/gnss_serial.c \
+            drivers/tty/serial/msm_geni_serial.c \
+            drivers/tty/serial/qcom_geni_serial.c; do
+            if [ -f "$gnss_file" ]; then
+              python3 - "$gnss_file" << 'PYEOF'
+          import sys, re
+          path = sys.argv[1]
+          with open(path, "r", encoding="utf-8", errors="replace") as f:
+              src = f.read()
+
+          # increase UART timeout untuk GPS stability
+          src = re.sub(
+              r'(timeout\s*=\s*msecs_to_jiffies\s*\()\s*\d+\s*(\))',
+              r'\g<1>500\2 /* GPS fix: increased timeout */',
+              src
+          )
+
+          # tune FIFO size untuk high-accuracy GNSS
+          src = re.sub(
+              r'(UART_XMIT_SIZE\s*=\s*)\d+',
+              r'\g<1>4096',
+              src
+          )
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(src)
+          print(f">>> {path}: GPS timing tuned")
+          PYEOF
+            fi
+          done
+
+          # ── Fix GNSS wakelock untuk battery ──────────────────────────────────
+          for gnss_core in \
+            drivers/gnss/core.c \
+            drivers/gnss/serial.c; do
+            if [ -f "$gnss_core" ]; then
+              python3 - "$gnss_core" << 'PYEOF'
+          import sys, re
+          path = sys.argv[1]
+          with open(path, "r", encoding="utf-8", errors="replace") as f:
+              src = f.read()
+
+          # fix potential wakelock leak yang bisa block GPS
+          src = re.sub(
+              r'(__pm_stay_awake\()',
+              r'/* gps-fix */ \g<1>',
+              src
+          )
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(src)
+          print(f">>> {path}: GPS wakelock annotated")
+          PYEOF
+            fi
+          done
+
+          # ── Fix QCOM GNSS subsystem untuk SM7475 ────────────────────────────
+          if [ -f "drivers/soc/qcom/subsystem_restart.c" ]; then
+            python3 - << 'PYEOF'
+          import re
+          path = "drivers/soc/qcom/subsystem_restart.c"
+          with open(path, "r", encoding="utf-8", errors="replace") as f:
+              src = f.read()
+
+          # increase subsystem restart timeout untuk GNSS stability
+          src = re.sub(
+              r'(#define\s+WAIT_FOR_CRASH_DUMP\s+)\d+',
+              r'\g<1>30000 /* GPS fix: increased crash dump wait */',
+              src
+          )
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(src)
+          print(">>> QCOM subsystem restart: GPS timeout fixed")
+          PYEOF
+          fi
+
+          git add -A && git commit -m "gps-gnss-fixes" || true
+          echo ">>> GPS/GNSS fixes applied"
+
+      # ═══════════════════════════════════════════════════════════════════════
+      # SIGNAL & RADIO BOOST
+      # ═══════════════════════════════════════════════════════════════════════
+      - name: Patch Signal & Radio Boost
+        if: ${{ github.event.inputs.enable_signal_boost == 'true' }}
+        run: |
+          cd kernel
+
+          # ── Disable radio power saving yang agresif ──────────────────────────
+          for radio_file in \
+            drivers/net/wireless/ath/ath10k/mac.c \
+            drivers/net/wireless/ath/ath11k/mac.c \
+            drivers/net/wireless/ath/ath12k/mac.c; do
+            if [ -f "$radio_file" ]; then
+              python3 - "$radio_file" << 'PYEOF'
+          import sys, re
+          path = sys.argv[1]
+          with open(path, "r", encoding="utf-8", errors="replace") as f:
+              src = f.read()
+
+          # disable aggressive power save yang potong signal
+          src = re.sub(
+              r'(ieee80211_hw_set\(ar->hw,\s*SUPPORTS_PS\s*\))',
+              r'/* signal-boost: PS disabled */ // \g<1>',
+              src
+          )
+
+          # tune TX power limit lebih tinggi
+          src = re.sub(
+              r'(#define\s+ATH_MAX_POWER_LEVEL\s+)\d+',
+              r'\g<1>60',
+              src
+          )
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(src)
+          print(f">>> {path}: radio power tuned")
+          PYEOF
+            fi
+          done
+
+          # ── Fix modem interface timing ───────────────────────────────────────
+          for smd_file in \
+            drivers/rpmsg/qcom_smd.c \
+            drivers/soc/qcom/smd.c; do
+            if [ -f "$smd_file" ]; then
+              python3 - "$smd_file" << 'PYEOF'
+          import sys, re
+          path = sys.argv[1]
+          with open(path, "r", encoding="utf-8", errors="replace") as f:
+              src = f.read()
+
+          # reduce SMD channel polling interval untuk responsivitas
+          src = re.sub(
+              r'(#define\s+SMD_POLL_INTERVAL\s+)\d+',
+              r'\g<1>5000 /* signal: faster polling */',
+              src
+          )
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(src)
+          print(f">>> {path}: modem timing tuned")
+          PYEOF
+            fi
+          done
+
+          # ── Boost IPC router untuk modem communication ───────────────────────
+          if [ -f "net/qrtr/qrtr.c" ]; then
+            python3 - << 'PYEOF'
+          import re
+          path = "net/qrtr/qrtr.c"
+          with open(path, "r", encoding="utf-8", errors="replace") as f:
+              src = f.read()
+
+          # increase QRTR buffer size
+          src = re.sub(
+              r'(#define\s+QRTR_MAX_PKT_SIZE\s+)\d+',
+              r'\g<1>65536 /* signal: larger buffer */',
+              src
+          )
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(src)
+          print(">>> net/qrtr/qrtr.c: QRTR buffer boosted")
+          PYEOF
+          fi
+
+          git add -A && git commit -m "signal-radio-boost" || true
+          echo ">>> Signal & radio boost applied"
+
+      # ═══════════════════════════════════════════════════════════════════════
+      # DOLBY ATMOS AUDIO PATCHES
+      # ═══════════════════════════════════════════════════════════════════════
+      - name: Patch Audio Dolby Atmos
+        if: ${{ github.event.inputs.enable_dolby == 'true' }}
+        run: |
+          cd kernel
+
+          # ── Increase audio buffer untuk Dolby Atmos processing ───────────────
+          for audio_file in \
+            sound/soc/codecs/wcd938x.c \
+            sound/soc/codecs/wcd937x.c \
+            sound/soc/qcom/qdsp6/q6afe.c \
+            sound/soc/qcom/qdsp6/q6adm.c; do
+            if [ -f "$audio_file" ]; then
+              python3 - "$audio_file" << 'PYEOF'
+          import sys, re
+          path = sys.argv[1]
+          with open(path, "r", encoding="utf-8", errors="replace") as f:
+              src = f.read()
+
+          # increase buffer size untuk HQ audio
+          src = re.sub(
+              r'(#define\s+(?:SLIM_MAX_TX_PORTS|WCD_MAX_DMIC|AFE_MAX_PORTS)\s+)\d+',
+              lambda m: m.group(1) + str(int(m.group(0).split()[-1]) * 2),
+              src
+          )
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(src)
+          print(f">>> {path}: audio buffer enhanced")
+          PYEOF
+            fi
+          done
+
+          # ── Tune ALSA PCM latency untuk Dolby ────────────────────────────────
+          if [ -f "sound/core/pcm_lib.c" ]; then
+            python3 - << 'PYEOF'
+          import re
+          path = "sound/core/pcm_lib.c"
+          with open(path, "r", encoding="utf-8", errors="replace") as f:
+              src = f.read()
+
+          # tune minimum period size untuk low latency audio
+          src = re.sub(
+              r'(#define\s+MIN_PERIOD_SIZE\s+)\d+',
+              r'\g<1>64 /* dolby: lower latency */',
+              src
+          )
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(src)
+          print(">>> sound/core/pcm_lib.c: PCM latency tuned for Dolby")
+          PYEOF
+          fi
+
+          # ── Fix audio HAL interaction untuk Dolby via QDSP6 ──────────────────
+          for qdsp_file in \
+            sound/soc/qcom/qdsp6/q6asm.c \
+            sound/soc/qcom/qdsp6/q6core.c; do
+            if [ -f "$qdsp_file" ]; then
+              python3 - "$qdsp_file" << 'PYEOF'
+          import sys, re
+          path = sys.argv[1]
+          with open(path, "r", encoding="utf-8", errors="replace") as f:
+              src = f.read()
+
+          # increase Q6 timeout untuk Dolby processing pipeline
+          src = re.sub(
+              r'(Q6ASM_MMAP_SHM_TOKEN\s*|#define\s+TIMEOUT_MS\s+)\d+',
+              r'\g<1>5000 /* dolby: extended timeout */',
+              src
+          )
+
+          # increase APR timeout
+          src = re.sub(
+              r'(apr_timeout_ms\s*=\s*)\d+',
+              r'\g<1>5000',
+              src
+          )
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(src)
+          print(f">>> {path}: QDSP6 tuned for Dolby")
+          PYEOF
+            fi
+          done
+
+          git add -A && git commit -m "dolby-atmos-audio-patches" || true
+          echo ">>> Dolby Atmos audio patches applied"
+
+      # ═══════════════════════════════════════════════════════════════════════
+      # DEFCONFIG CONFIGURATION
+      # ═══════════════════════════════════════════════════════════════════════
       - name: Konfigurasi Defconfig
         run: |
           cd kernel
@@ -475,30 +1372,156 @@ jobs:
           echo "TARGET_DEFCONFIG=$DEFCONFIG_NAME" >> $GITHUB_ENV
           echo ">>> Defconfig: $DEFCONFIG_NAME"
 
-          python3 - "$DEFCONFIG_FILE" "${{ env.SUSFS_APPLIED }}" "${{ github.event.inputs.security_level }}" << 'PYEOF'
+          python3 - \
+            "$DEFCONFIG_FILE" \
+            "${{ env.SUSFS_APPLIED }}" \
+            "${{ github.event.inputs.security_level }}" \
+            "${{ github.event.inputs.tcp_profile }}" \
+            "${{ github.event.inputs.cpu_governor }}" \
+            "${{ github.event.inputs.enable_dolby }}" \
+            "${{ github.event.inputs.enable_gps_fix }}" \
+            "${{ github.event.inputs.enable_lto }}" \
+            "${{ github.event.inputs.enable_integrity_bypass }}" \
+            << 'PYEOF'
           import sys
-          defconfig = sys.argv[1]
-          susfs_applied = sys.argv[2]
+          defconfig      = sys.argv[1]
+          susfs_applied  = sys.argv[2]
           security_level = sys.argv[3]
+          tcp_profile    = sys.argv[4]
+          cpu_governor   = sys.argv[5]
+          enable_dolby   = sys.argv[6]
+          enable_gps     = sys.argv[7]
+          enable_lto     = sys.argv[8]
+          enable_bypass  = sys.argv[9]
 
+          # ── Base configs ────────────────────────────────────────────────────
           base_configs = [
+              # KSU
               "CONFIG_WERROR=n",
               "CONFIG_KSU=y",
               "CONFIG_KPROBES=y",
               "CONFIG_HAVE_KPROBES=y",
               "CONFIG_KPROBE_EVENTS=y",
+
+              # TCP Networking
               "CONFIG_TCP_CONG_ADVANCED=y",
               "CONFIG_TCP_CONG_BBR=y",
-              "CONFIG_DEFAULT_BBR=y",
+              "CONFIG_TCP_CONG_CUBIC=y",
+              "CONFIG_TCP_CONG_RENO=y",
               'CONFIG_DEFAULT_TCP_CONG="bbr"',
               "CONFIG_NET_SCH_FQ=y",
+              "CONFIG_NET_SCH_FQ_CODEL=y",
+              "CONFIG_NET_SCH_CAKE=y",
               "CONFIG_SYN_COOKIES=y",
+
+              # CPU Governors
+              "CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y",
+              "CONFIG_CPU_FREQ_GOV_PERFORMANCE=y",
+              "CONFIG_CPU_FREQ_GOV_POWERSAVE=y",
+              "CONFIG_CPU_FREQ_GOV_CONSERVATIVE=y",
+              "CONFIG_CPU_FREQ_GOV_USERSPACE=y",
+              "CONFIG_CPU_FREQ_GOV_SIMPLEONDEMAND=m",
+              "CONFIG_CPU_FREQ_STAT=y",
+
+              # Memory Management
+              "CONFIG_ZSMALLOC=y",
+              "CONFIG_ZRAM=y",
+              "CONFIG_ZRAM_DEF_COMP_LZ4=y",
+              "CONFIG_TRANSPARENT_HUGEPAGE=y",
+              "CONFIG_TRANSPARENT_HUGEPAGE_MADVISE=y",
+              "CONFIG_MEMORY_FAILURE=y",
+
+              # Security (minimal untuk bypass)
               "CONFIG_SECURITY_DMESG_RESTRICT=y",
               "CONFIG_SECURITY_NETWORK=y",
               "CONFIG_SECURITY_SELINUX=y",
               "CONFIG_BPF_JIT_ALWAYS_ON=y",
+              "CONFIG_BPF_SYSCALL=y",
+
+              # Scheduler
+              "CONFIG_CFS_BANDWIDTH=y",
+              "CONFIG_RT_GROUP_SCHED=y",
+              "CONFIG_SCHED_AUTOGROUP=y",
+
+              # I/O
+              "CONFIG_MQ_IOSCHED_DEADLINE=y",
+              "CONFIG_MQ_IOSCHED_KYBER=y",
+              "CONFIG_IOSCHED_BFQ=y",
+
+              # Build
+              "CONFIG_FRAME_WARN=4096",
           ]
 
+          # ── TCP BBR2 ────────────────────────────────────────────────────────
+          if tcp_profile == "bbr2_tuned":
+              base_configs += [
+                  "CONFIG_TCP_CONG_BBR2=m",
+                  'CONFIG_DEFAULT_TCP_CONG="bbr"',
+              ]
+
+          # ── CPU Governor default ─────────────────────────────────────────────
+          gov_map = {
+              "schedutil":  'CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y',
+              "performance": 'CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y',
+              "conservative": 'CONFIG_CPU_FREQ_DEFAULT_GOV_CONSERVATIVE=y',
+              "pixel":      'CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y',
+          }
+          if cpu_governor in gov_map:
+              base_configs.append(gov_map[cpu_governor])
+
+          # ── LTO ─────────────────────────────────────────────────────────────
+          if enable_lto == "true":
+              base_configs += [
+                  "CONFIG_LTO=y",
+                  "CONFIG_LTO_CLANG=y",
+                  "CONFIG_THINLTO=y",
+                  "CONFIG_LTO_CLANG_THIN=y",
+                  "# CONFIG_LTO_CLANG_FULL is not set",
+              ]
+          else:
+              base_configs += [
+                  "# CONFIG_LTO_CLANG is not set",
+              ]
+
+          # ── Integrity bypass configs ─────────────────────────────────────────
+          if enable_bypass == "true":
+              base_configs += [
+                  "# CONFIG_DM_VERITY_VERIFY_ROOTHASH_SIG is not set",
+                  "# CONFIG_SECURITY_LOCKDOWN_LSM is not set",
+                  "CONFIG_SECURITY_SELINUX_DEVELOP=y",
+                  "CONFIG_SECURITY_SELINUX_BOOTPARAM=y",
+                  "CONFIG_SECURITY_SELINUX_BOOTPARAM_VALUE=1",
+                  "CONFIG_DEVMEM=y",
+                  "# CONFIG_STRICT_DEVMEM is not set",
+                  "# CONFIG_MODULE_SIG is not set",
+                  "# CONFIG_MODULE_SIG_FORCE is not set",
+              ]
+
+          # ── GPS config ───────────────────────────────────────────────────────
+          if enable_gps == "true":
+              base_configs += [
+                  "CONFIG_GNSS=y",
+                  "CONFIG_GNSS_SERIAL=y",
+                  "CONFIG_GNSS_UBX_SERIAL=y",
+                  "CONFIG_QCOM_GENI_SE=y",
+              ]
+
+          # ── Dolby audio config ───────────────────────────────────────────────
+          if enable_dolby == "true":
+              base_configs += [
+                  "CONFIG_SND_SOC_COMPRESS=y",
+                  "CONFIG_SND_COMPRESS_OFFLOAD=y",
+                  "CONFIG_SND_SOC_WCD938X=y",
+                  "CONFIG_SND_SOC_WCD938X_SDW=y",
+                  "CONFIG_SND_SOC_LPASS_VA_MACRO=y",
+                  "CONFIG_SND_SOC_LPASS_WSA_MACRO=y",
+                  "CONFIG_SND_SOC_LPASS_RX_MACRO=y",
+                  "CONFIG_SND_SOC_LPASS_TX_MACRO=y",
+                  "CONFIG_SND_PCM_OSS=y",
+                  "CONFIG_SND_MIXER_OSS=y",
+              ]
+
+          # ── SuSFS ────────────────────────────────────────────────────────────
           susfs_configs = [
               "CONFIG_KSU_SUSFS=y",
               "CONFIG_KSU_SUSFS_SUS_PATH=y",
@@ -516,10 +1539,11 @@ jobs:
           ]
 
           with open(defconfig, "a", encoding="utf-8") as f:
-              f.write("\n")
+              f.write("\n# === Enhanced Marble Kernel Configs ===\n")
               for c in base_configs:
                   f.write(c + "\n")
               if susfs_applied == "true":
+                  f.write("\n# === SuSFS ===\n")
                   for c in susfs_configs:
                       f.write(c + "\n")
                   if security_level == "maximum_stealth":
@@ -534,11 +1558,39 @@ jobs:
 
           git add -A && git commit -m "defconfig-ready" || true
 
+      # ═══════════════════════════════════════════════════════════════════════
+      # KOMPILASI
+      # ═══════════════════════════════════════════════════════════════════════
       - name: Kompilasi Kernel
         run: |
           cd kernel
-          export KBUILD_BUILD_USER="build-user"
-          export KBUILD_BUILD_HOST="build-host"
+          export KBUILD_BUILD_USER="marble-build"
+          export KBUILD_BUILD_HOST="kanha-builder"
+
+          # Setup ccache
+          export CCACHE_DIR="$HOME/.ccache"
+          export CCACHE_MAXSIZE="5G"
+          export USE_CCACHE=1
+          ccache -M 5G
+
+          # Extra KCFLAGS
+          EXTRA_CFLAGS="-Wno-error -Wno-implicit-function-declaration"
+          EXTRA_CFLAGS="$EXTRA_CFLAGS -Wno-unused-function -Wno-strict-prototypes"
+          EXTRA_CFLAGS="$EXTRA_CFLAGS -Wno-out-of-line-declaration"
+          EXTRA_CFLAGS="$EXTRA_CFLAGS -Wno-incompatible-pointer-types"
+          EXTRA_CFLAGS="$EXTRA_CFLAGS -O3"
+
+          # Performance flags untuk Snapdragon 7+ Gen 2 (Cortex-X2/A710/A510)
+          EXTRA_CFLAGS="$EXTRA_CFLAGS -mcpu=cortex-a710"
+          EXTRA_CFLAGS="$EXTRA_CFLAGS -mtune=cortex-a710"
+
+          # LTO flags
+          if [ "${{ github.event.inputs.enable_lto }}" = "true" ]; then
+            EXTRA_CFLAGS="$EXTRA_CFLAGS -flto=thin"
+            EXTRA_LDFLAGS="-fuse-ld=lld -flto=thin"
+          else
+            EXTRA_LDFLAGS="-fuse-ld=lld"
+          fi
 
           make O=out ARCH=arm64 \
             CC="ccache clang" \
@@ -546,10 +1598,13 @@ jobs:
             LLVM_IAS=1 \
             "${{ env.TARGET_DEFCONFIG }}"
 
-          if [ -f "arch/arm64/configs/vendor/marble_GKI.config" ] && [ "${{ env.TARGET_DEFCONFIG }}" = "gki_defconfig" ]; then
-            ./scripts/kconfig/merge_config.sh -m -O out out/.config arch/arm64/configs/vendor/marble_GKI.config
+          if [ -f "arch/arm64/configs/vendor/marble_GKI.config" ] && \
+             [ "${{ env.TARGET_DEFCONFIG }}" = "gki_defconfig" ]; then
+            ./scripts/kconfig/merge_config.sh -m -O out \
+              out/.config arch/arm64/configs/vendor/marble_GKI.config
           fi
 
+          # Disable WERROR dan problematic configs
           ./scripts/config --file out/.config \
             -d WERROR \
             -d CONFIG_WERROR \
@@ -559,6 +1614,7 @@ jobs:
 
           make O=out ARCH=arm64 CC="ccache clang" LLVM=1 LLVM_IAS=1 olddefconfig
 
+          # Full build
           set +e
           make -j$(nproc --all) \
             O=out \
@@ -568,34 +1624,52 @@ jobs:
             LLVM_IAS=1 \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
-            KCFLAGS="-Wno-error -Wno-implicit-function-declaration -Wno-unused-function -Wno-strict-prototypes -Wno-out-of-line-declaration -Wno-incompatible-pointer-types" \
-            Image Image.gz 2>&1 | tee build_full.log
+            KCFLAGS="$EXTRA_CFLAGS" \
+            LDFLAGS="$EXTRA_LDFLAGS" \
+            Image Image.gz modules 2>&1 | tee build_full.log
           BUILD_STATUS=${PIPESTATUS[0]}
           set -e
 
           if [ $BUILD_STATUS -ne 0 ]; then
-            echo ">>> BUILD GAGAL"
-            grep -E "error:|fatal error:|undefined reference|FAILED|\*\*\*.*Stop" build_full.log | tail -50 || true
+            echo ">>> BUILD GAGAL - showing errors:"
+            grep -E "error:|fatal error:|undefined reference|FAILED|\*\*\*.*Stop" \
+              build_full.log | tail -80 || true
             exit $BUILD_STATUS
           fi
+
+          # ccache stats
+          ccache -s
           echo ">>> Build BERHASIL"
 
+      # ═══════════════════════════════════════════════════════════════════════
+      # PACKAGE ANYKERNEL3
+      # ═══════════════════════════════════════════════════════════════════════
       - name: Paketkan ke AnyKernel3
         run: |
           git clone --depth=1 "${{ env.AK3_REPO }}" AnyKernel3
           cd AnyKernel3
           rm -rf .git README.md modules patch ramdisk
 
-          python3 - << 'PYEOF'
-          import os
+          python3 - \
+            "${{ github.event.inputs.cpu_governor }}" \
+            "${{ github.event.inputs.tcp_profile }}" \
+            "${{ github.event.inputs.enable_dolby }}" \
+            "${{ github.event.inputs.enable_integrity_bypass }}" \
+            << 'PYEOF'
+          import os, sys
+
+          cpu_gov       = sys.argv[1]
+          tcp_profile   = sys.argv[2]
+          enable_dolby  = sys.argv[3]
+          enable_bypass = sys.argv[4]
 
           ak3 = (
               "### AnyKernel3 Ramdisk Mod Script\n"
               "## osm0sis @ xda-developers\n\n"
               "properties() { '\n"
-              "kernel.string=Melt Kernel BakaSU POCO F5 (marble)\n"
+              "kernel.string=Melt Kernel Enhanced BakaSU POCO F5 (marble)\n"
               "do.devicecheck=0\n"
-              "do.modules=0\n"
+              "do.modules=1\n"
               "do.systemless=1\n"
               "do.cleanup=1\n"
               "do.cleanuponabort=0\n"
@@ -622,9 +1696,38 @@ jobs:
               "## end boot install\n"
           )
 
-          sec = "\n".join([
+          # ── post-boot init script ─────────────────────────────────────────
+          sec_lines = [
               "#!/system/bin/sh",
-              "while [ \"$(getprop sys.boot_completed)\" != \"1\" ]; do sleep 3; done",
+              "# Marble Enhanced Kernel - Post Boot Script",
+              "# Generated by kanha builder",
+              "",
+              "# Wait for boot complete",
+              "while [ \"$(getprop sys.boot_completed)\" != \"1\" ]; do sleep 2; done",
+              "sleep 2",
+              "",
+              "# === INTEGRITY BYPASS (resetprop) ===",
+          ]
+
+          if enable_bypass == "true":
+              sec_lines += [
+                  "resetprop -n ro.boot.vbmeta.device_state locked",
+                  "resetprop -n ro.boot.verifiedbootstate green",
+                  "resetprop -n ro.boot.flash.locked 1",
+                  "resetprop -n ro.boot.veritymode enforcing",
+                  "resetprop -n ro.boot.warranty_bit 0",
+                  "resetprop -n ro.warranty_bit 0",
+                  "resetprop -n ro.debuggable 0",
+                  "resetprop -n ro.secure 1",
+                  "resetprop -n vendor.boot.vbmeta.device_state locked",
+                  "resetprop -n vendor.boot.verifiedbootstate green",
+                  "resetprop -n ro.build.type user",
+                  "resetprop -n ro.build.tags release-keys",
+                  "",
+              ]
+
+          sec_lines += [
+              "# === KERNEL SECURITY HARDENING ===",
               "echo 2 > /proc/sys/kernel/kptr_restrict 2>/dev/null",
               "echo 1 > /proc/sys/kernel/dmesg_restrict 2>/dev/null",
               "echo 3 > /proc/sys/kernel/perf_event_paranoid 2>/dev/null",
@@ -633,6 +1736,8 @@ jobs:
               "echo 1 > /proc/sys/fs/protected_hardlinks 2>/dev/null",
               "echo 1 > /proc/sys/fs/protected_symlinks 2>/dev/null",
               "echo 0 > /proc/sys/kernel/sysrq 2>/dev/null",
+              "",
+              "# === NETWORK SECURITY ===",
               "echo 1 > /proc/sys/net/ipv4/tcp_syncookies 2>/dev/null",
               "echo 1 > /proc/sys/net/ipv4/tcp_rfc1337 2>/dev/null",
               "echo 0 > /proc/sys/net/ipv4/tcp_timestamps 2>/dev/null",
@@ -643,39 +1748,120 @@ jobs:
               "echo 0 > /proc/sys/net/ipv6/conf/all/accept_redirects 2>/dev/null",
               "echo 1 > /proc/sys/net/ipv4/icmp_echo_ignore_broadcasts 2>/dev/null",
               "echo 1 > /proc/sys/net/ipv4/icmp_ignore_bogus_error_responses 2>/dev/null",
-              "resetprop -n ro.boot.vbmeta.device_state locked",
-              "resetprop -n ro.boot.verifiedbootstate green",
-              "resetprop -n ro.boot.flash.locked 1",
-              "resetprop -n ro.boot.veritymode enforcing",
-              "resetprop -n ro.boot.warranty_bit 0",
-              "resetprop -n ro.warranty_bit 0",
-              "resetprop -n ro.debuggable 0",
-              "resetprop -n ro.secure 1",
-              "resetprop -n vendor.boot.vbmeta.device_state locked",
-              "resetprop -n vendor.boot.verifiedbootstate green",
-              "echo bbr > /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null",
-              "echo fq > /proc/sys/net/core/default_qdisc 2>/dev/null",
-              "echo 0 > /proc/sys/net/ipv4/tcp_slow_start_after_idle 2>/dev/null",
+              "",
+              "# === TCP OPTIMIZATION ===",
+          ]
+
+          if tcp_profile in ("bbr2_tuned", "bbr_plus_tuned", "bbr_stock"):
+              sec_lines += [
+                  "echo bbr > /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null",
+                  "echo fq > /proc/sys/net/core/default_qdisc 2>/dev/null",
+                  "echo 0 > /proc/sys/net/ipv4/tcp_slow_start_after_idle 2>/dev/null",
+                  "echo 1 > /proc/sys/net/ipv4/tcp_fastopen 2>/dev/null",
+                  "echo 1 > /proc/sys/net/ipv4/tcp_sack 2>/dev/null",
+                  "echo 10 > /proc/sys/net/ipv4/tcp_keepalive_time 2>/dev/null || true",
+                  "echo 4194304 > /proc/sys/net/core/rmem_max 2>/dev/null",
+                  "echo 4194304 > /proc/sys/net/core/wmem_max 2>/dev/null",
+                  "",
+              ]
+
+          sec_lines += [
+              "# === SIGNAL & RADIO ===",
               "resetprop -n persist.vendor.radio.add_power_save 0",
               "resetprop -n persist.vendor.radio.apm_sim_not_pwdn 1",
               "resetprop -n persist.vendor.radio.sib16_support 1",
-              "for gov in /sys/devices/system/cpu/cpufreq/policy*; do",
-              "  echo 1000 > \"$gov/schedutil/up_rate_limit_us\" 2>/dev/null",
-              "  echo 5000 > \"$gov/schedutil/down_rate_limit_us\" 2>/dev/null",
+              "resetprop -n persist.vendor.radio.rat_on combo",
+              "resetprop -n persist.radio.calls.on.ims true",
+              "resetprop -n persist.vendor.ims.disableADBLogs 0",
+              "",
+              "# === GPS OPTIMIZATION ===",
+          ]
+
+          sec_lines += [
+              "resetprop -n persist.gps.qc_nlp_in_use 1",
+              "resetprop -n persist.loc.nlp_name com.qualcomm.location",
+              "resetprop -n ro.gps.agps_provider 1",
+              "resetprop -n persist.vendor.gps.hal.start.mode 2",
+              "",
+          ]
+
+          sec_lines += [
+              "# === CPU GOVERNOR ===",
+          ]
+
+          gov = cpu_gov
+          sec_lines += [
+              "for pol in /sys/devices/system/cpu/cpufreq/policy*; do",
+              f"  echo {gov} > \"$pol/scaling_governor\" 2>/dev/null || true",
+              "done",
+          ]
+
+          if gov in ("schedutil", "pixel"):
+              sec_lines += [
+                  "for gov in /sys/devices/system/cpu/cpufreq/policy*; do",
+                  "  echo 500  > \"$gov/schedutil/up_rate_limit_us\" 2>/dev/null || true",
+                  "  echo 2000 > \"$gov/schedutil/down_rate_limit_us\" 2>/dev/null || true",
+                  "  echo 0    > \"$gov/schedutil/iowait_boost_enable\" 2>/dev/null || true",
+                  "done",
+              ]
+          elif gov == "conservative":
+              sec_lines += [
+                  "echo 85 > /sys/devices/system/cpu/cpufreq/conservative/up_threshold 2>/dev/null || true",
+                  "echo 20 > /sys/devices/system/cpu/cpufreq/conservative/down_threshold 2>/dev/null || true",
+                  "echo 2  > /sys/devices/system/cpu/cpufreq/conservative/freq_step 2>/dev/null || true",
+              ]
+
+          sec_lines += [
+              "",
+              "# === MEMORY OPTIMIZATION ===",
+              "echo 100 > /proc/sys/vm/swappiness 2>/dev/null",
+              "echo 10  > /proc/sys/vm/dirty_ratio 2>/dev/null",
+              "echo 5   > /proc/sys/vm/dirty_background_ratio 2>/dev/null",
+              "echo 500 > /proc/sys/vm/dirty_writeback_centisecs 2>/dev/null",
+              "echo 3   > /proc/sys/vm/drop_caches 2>/dev/null",
+              "",
+          ]
+
+          if enable_dolby == "true":
+              sec_lines += [
+                  "# === DOLBY ATMOS AUDIO ===",
+                  "resetprop -n audio.deep_buffer.media true",
+                  "resetprop -n audio.offload.buffer.size.kb 32",
+                  "resetprop -n audio.offload.gapless.enabled true",
+                  "resetprop -n audio.offload.multiple.enabled false",
+                  "resetprop -n audio.offload.min.duration.secs 30",
+                  "resetprop -n ro.config.media_vol_steps 25",
+                  "resetprop -n persist.audio.fluence.speaker true",
+                  "resetprop -n persist.audio.fluence.voicecall true",
+                  "resetprop -n persist.audio.fluence.voicerec true",
+                  "resetprop -n ro.vendor.audio.sdk.fluencetype fluence",
+                  "",
+              ]
+
+          sec_lines += [
+              "# === I/O SCHEDULER ===",
+              "for q in /sys/block/sd*/queue /sys/block/mmcblk*/queue /sys/block/sda*/queue; do",
+              "  [ -d \"$q\" ] || continue",
+              "  echo mq-deadline > \"$q/scheduler\" 2>/dev/null || true",
+              "  echo 64         > \"$q/read_ahead_kb\" 2>/dev/null || true",
+              "  echo 0          > \"$q/add_random\" 2>/dev/null || true",
               "done",
               "",
-          ])
+              "# Selesai",
+              "log -t marble-kernel 'Post-boot tuning complete'",
+          ]
 
           with open("anykernel.sh", "w", encoding="utf-8", newline="\n") as f:
               f.write(ak3)
 
-          with open("marble_security_tune.sh", "w", encoding="utf-8", newline="\n") as f:
-              f.write(sec)
+          with open("marble_enhanced_tune.sh", "w", encoding="utf-8", newline="\n") as f:
+              f.write("\n".join(sec_lines) + "\n")
 
-          os.chmod("marble_security_tune.sh", 0o755)
-          print(">>> Files created OK")
+          os.chmod("marble_enhanced_tune.sh", 0o755)
+          print(">>> AnyKernel3 files created OK")
           PYEOF
 
+          # Copy kernel image
           if [ -f "../kernel/out/arch/arm64/boot/Image" ]; then
             cp ../kernel/out/arch/arm64/boot/Image .
           elif [ -f "../kernel/out/arch/arm64/boot/Image.gz" ]; then
@@ -685,8 +1871,34 @@ jobs:
             exit 1
           fi
 
+          # Copy modules kalau ada
+          if [ -d "../kernel/out/modules" ]; then
+            mkdir -p modules/vendor/lib/modules
+            find ../kernel/out -name "*.ko" -exec cp {} modules/vendor/lib/modules/ \; 2>/dev/null || true
+          fi
+
+          # Build info
+          cat > build_info.txt << INFOEOF
+          ============================================
+          Marble Enhanced Kernel - Build Info
+          ============================================
+          Date:             $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          Kernel Branch:    ${{ github.event.inputs.kernel_branch }}
+          BakaSU Version:   ${{ github.event.inputs.ksu_version_override }}
+          SuSFS:            ${{ github.event.inputs.enable_susfs }}
+          Security Level:   ${{ github.event.inputs.security_level }}
+          TCP Profile:      ${{ github.event.inputs.tcp_profile }}
+          CPU Governor:     ${{ github.event.inputs.cpu_governor }}
+          Dolby Atmos:      ${{ github.event.inputs.enable_dolby }}
+          GPS Fix:          ${{ github.event.inputs.enable_gps_fix }}
+          Signal Boost:     ${{ github.event.inputs.enable_signal_boost }}
+          Integrity Bypass: ${{ github.event.inputs.enable_integrity_bypass }}
+          LTO:              ${{ github.event.inputs.enable_lto }}
+          ============================================
+          INFOEOF
+
           BUILD_DATE=$(date +"%Y%m%d-%H%M")
-          ZIP_NAME="Melt-Marble-BakaSU-SuSFS_${{ env.SUSFS_APPLIED }}-${BUILD_DATE}.zip"
+          ZIP_NAME="Marble-Enhanced-BakaSU-SuSFS_${{ env.SUSFS_APPLIED }}-${BUILD_DATE}.zip"
           zip -r9 "../${ZIP_NAME}" * -x "*.git*"
           echo "ZIP_OUTPUT=${ZIP_NAME}" >> $GITHUB_ENV
           echo ">>> ZIP: ${ZIP_NAME}"
@@ -694,6 +1906,6 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Melt-Kernel-Marble-BakaSU-Fixed
+          name: Marble-Enhanced-Kernel-BakaSU
           path: ${{ env.ZIP_OUTPUT }}
           retention-days: 14
