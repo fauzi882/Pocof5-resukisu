@@ -1,4 +1,4 @@
-name: Build Marble Kernel (FULL POWER - All Security + All Features)
+name: Build Marble Kernel (FULL POWER)
 
 on:
   workflow_dispatch:
@@ -11,8 +11,11 @@ on:
       enable_susfs:
         description: 'Integrasikan Patch SuSFS'
         required: true
-        default: true
-        type: boolean
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
       security_level:
         description: 'Level Keamanan'
         required: true
@@ -31,7 +34,7 @@ on:
           - bbr_plus_tuned
           - bbr_stock
       kernel_branch:
-        description: 'Branch Source Kernel Pzqqt'
+        description: 'Branch Source Kernel'
         required: true
         default: 'melt-rebase'
         type: choice
@@ -49,35 +52,53 @@ on:
           - conservative
           - pixel
       enable_dolby:
-        description: 'Enable Dolby Atmos Audio Patches'
+        description: 'Enable Dolby Atmos'
         required: true
-        default: true
-        type: boolean
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
       enable_gps_fix:
-        description: 'Enable GPS/GNSS Fixes'
+        description: 'Enable GPS Fix'
         required: true
-        default: true
-        type: boolean
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
       enable_signal_boost:
-        description: 'Enable Signal & Radio Boost'
+        description: 'Enable Signal Boost'
         required: true
-        default: true
-        type: boolean
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
       enable_integrity_bypass:
-        description: 'Enable Kernel Integrity Bypass Patches'
+        description: 'Enable Integrity Bypass'
         required: true
-        default: true
-        type: boolean
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
       enable_lto:
         description: 'Enable LTO Thin'
         required: true
-        default: false
-        type: boolean
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
       enable_full_security:
-        description: 'Enable ALL Security Features (Full Power)'
+        description: 'Enable ALL Security Features'
         required: true
-        default: true
-        type: boolean
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
 
 permissions:
   contents: read
@@ -97,110 +118,81 @@ jobs:
     timeout-minutes: 240
 
     steps:
-      - name: Maksimalkan Ruang Disk Runner
+      - name: Maksimalkan Ruang Disk
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
           sudo docker image prune --all --force || true
           df -h
 
-      - name: Install Dependensi Kompilasi
+      - name: Install Dependensi
         run: |
-          sudo apt-get update
+          sudo apt-get update -qq
           sudo apt-get install -y \
             bc bison build-essential ccache cpio curl flex git git-lfs \
             libelf-dev libncurses5-dev libssl-dev lld llvm lz4 pahole \
             python3 python3-pip rsync unzip wget xz-utils zip zstd \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
             binutils-aarch64-linux-gnu libdw-dev libunwind-dev \
-            libaudit-dev libslang2-dev libnuma-dev \
-            pkg-config libcap-dev libseccomp-dev \
-            gawk bzip2 make libtool automake autoconf
+            libaudit-dev libslang2-dev pkg-config libcap-dev libseccomp-dev
 
       - name: Setup Toolchain Clang
         run: |
           mkdir -p "$HOME/toolchains/clang"
-          CLANG_INSTALLED=false
-
-          echo ">>> Mencoba googlesource..."
-          if wget -q --timeout=120 --tries=2 -O clang.tar.gz "${{ env.CLANG_URL }}" 2>/dev/null; then
-            if tar -xzf clang.tar.gz -C "$HOME/toolchains/clang" 2>/dev/null; then
-              echo ">>> Clang dari googlesource OK"
-              CLANG_INSTALLED=true
-            fi
+          CLANG_OK=false
+          wget -q --timeout=120 --tries=2 -O /tmp/clang.tar.gz "${{ env.CLANG_URL }}" 2>/dev/null && \
+            tar -xzf /tmp/clang.tar.gz -C "$HOME/toolchains/clang" 2>/dev/null && \
+            CLANG_OK=true || true
+          rm -f /tmp/clang.tar.gz
+          if [ "$CLANG_OK" = "false" ]; then
+            ZYC="https://github.com/ZyCromerZ/Clang/releases/download/18.0.0git-20240302-release/Clang-18.0.0git-20240302.tar.gz"
+            wget -q --timeout=180 --tries=2 -O /tmp/clang.tar.gz "$ZYC" 2>/dev/null && \
+              tar -xzf /tmp/clang.tar.gz -C "$HOME/toolchains/clang" 2>/dev/null && \
+              CLANG_OK=true || true
+            rm -f /tmp/clang.tar.gz
           fi
-          rm -f clang.tar.gz
-
-          if [ "$CLANG_INSTALLED" = "false" ]; then
-            echo ">>> Mencoba ZyCromerZ clang-18..."
-            ZYC_URL="https://github.com/ZyCromerZ/Clang/releases/download/18.0.0git-20240302-release/Clang-18.0.0git-20240302.tar.gz"
-            if wget -q --timeout=180 --tries=2 -O clang.tar.gz "$ZYC_URL" 2>/dev/null; then
-              if tar -xzf clang.tar.gz -C "$HOME/toolchains/clang" 2>/dev/null; then
-                echo ">>> Clang dari ZyCromerZ OK"
-                CLANG_INSTALLED=true
-              fi
-            fi
-            rm -f clang.tar.gz
-          fi
-
-          if [ "$CLANG_INSTALLED" = "false" ]; then
-            echo ">>> Fallback ke apt LLVM-17..."
+          if [ "$CLANG_OK" = "false" ]; then
             wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
               | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
             echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-17 main" \
               | sudo tee /etc/apt/sources.list.d/llvm.list >/dev/null
-            sudo apt-get update -qq
-            sudo apt-get install -y clang-17 lld-17 llvm-17
+            sudo apt-get update -qq && sudo apt-get install -y clang-17 lld-17 llvm-17
             mkdir -p "$HOME/toolchains/clang/bin"
-            for tool in clang clang++ ld.lld llvm-ar llvm-nm \
-                        llvm-objcopy llvm-objdump llvm-readelf llvm-strip; do
-              if command -v "${tool}-17" >/dev/null 2>&1; then
-                ln -sf "$(command -v ${tool}-17)" "$HOME/toolchains/clang/bin/${tool}"
-              fi
+            for t in clang clang++ ld.lld llvm-ar llvm-nm llvm-objcopy llvm-objdump llvm-strip; do
+              command -v "${t}-17" >/dev/null 2>&1 && \
+                ln -sf "$(command -v ${t}-17)" "$HOME/toolchains/clang/bin/${t}" || true
             done
-            ln -sf "$(command -v clang-17)" "$HOME/toolchains/clang/bin/clang" 2>/dev/null || true
-            CLANG_INSTALLED=true
           fi
-
           echo "$HOME/toolchains/clang/bin" >> $GITHUB_PATH
           clang --version || true
 
-      - name: Clone Source Kernel Pzqqt
+      - name: Clone Kernel Source
         run: |
-          git clone --depth=1 -b "${{ github.event.inputs.kernel_branch }}" "${{ env.KERNEL_REPO }}" kernel
+          git clone --depth=1 -b "${{ github.event.inputs.kernel_branch }}" \
+            "${{ env.KERNEL_REPO }}" kernel
           cd kernel
           git config user.name "build-user"
           git config user.email "build-user@android"
 
-      - name: Siapkan Repo SuSFS
+      - name: Clone SuSFS
         if: ${{ github.event.inputs.enable_susfs == 'true' }}
         run: |
           git clone --depth=1 -b "${{ env.SUSFS_BRANCH }}" "${{ env.SUSFS_REPO }}" susfs4ksu
-          echo ">>> SuSFS repo siap"
 
       - name: Integrasi BakaSU
         run: |
           cd kernel
           rm -rf KernelSU drivers/kernelsu
-          sed -i '/kernelsu/d' drivers/Makefile || true
-          sed -i '/kernelsu/d' drivers/Kconfig || true
+          sed -i '/kernelsu/d' drivers/Makefile drivers/Kconfig 2>/dev/null || true
           git add -A && git commit -m "clean-pre-root" || true
-
-          curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash -s main || \
-          curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash
-
-          if [ ! -d "KernelSU" ] && [ ! -d "drivers/kernelsu" ]; then
-            echo "ERROR: BakaSU gagal"
-            exit 1
-          fi
-
+          curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash -s main \
+            || curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash
+          [ -d "KernelSU" ] || [ -d "drivers/kernelsu" ] || { echo "ERROR: BakaSU gagal"; exit 1; }
           if [ -d "KernelSU" ]; then
             cd KernelSU
-            git config user.name "build-user"
-            git config user.email "build-user@android"
+            git config user.name "build-user" && git config user.email "build-user@android"
             git fetch --all --tags || true
-            LATEST_REF=$(git for-each-ref --sort=-committerdate \
-              --format='%(refname:short)' refs/remotes/origin/ | head -n 1)
-            [ -n "$LATEST_REF" ] && git checkout -f "$LATEST_REF"
+            REF=$(git for-each-ref --sort=-committerdate --format="%(refname:short)" refs/remotes/origin/ | head -1)
+            [ -n "$REF" ] && git checkout -f "$REF" || true
             cd ..
           fi
           git add -A && git commit -m "bakasu-integrated" || true
@@ -208,966 +200,413 @@ jobs:
       - name: Sinkronisasi Versi BakaSU
         run: |
           cd kernel
-          TARGET_VER="${{ github.event.inputs.ksu_version_override }}"
-          [ "$TARGET_VER" = "auto" ] || [ -z "$TARGET_VER" ] && TARGET_VER="35252"
-          for kdir in KernelSU drivers/kernelsu; do
-            if [ -d "$kdir" ]; then
-              cd "$kdir"
-              git config user.name "build-user" || true
-              git config user.email "build-user@android" || true
-              find . -maxdepth 3 \( -name "Makefile" -o -name "Kbuild" -o -name "*.mk" \) | \
-              while read -r mf; do
-                sed -i "s/KSU_VERSION := .*/KSU_VERSION := ${TARGET_VER}/g" "$mf" || true
-                sed -i "s/^VERSION = .*/VERSION = ${TARGET_VER}/g" "$mf" || true
-                sed -i 's/-dirty//g' "$mf" || true
-              done
-              git add -A && git commit -m "version-sync-${TARGET_VER}" || true
-              cd - >/dev/null
-            fi
+          VER="${{ github.event.inputs.ksu_version_override }}"
+          [ "$VER" = "auto" ] || [ -z "$VER" ] && VER="35252"
+          for d in KernelSU drivers/kernelsu; do
+            [ -d "$d" ] || continue
+            find "$d" -maxdepth 3 \( -name "Makefile" -o -name "Kbuild" -o -name "*.mk" \) | while read f; do
+              sed -i "s/KSU_VERSION := .*/KSU_VERSION := ${VER}/g" "$f" || true
+              sed -i "s/^VERSION = .*/VERSION = ${VER}/g" "$f" || true
+              sed -i "s/-dirty//g" "$f" || true
+            done
           done
-          git add -A && git commit -m "clean-version" || true
+          git add -A && git commit -m "version-sync" || true
 
       - name: Integrasi SuSFS
         if: ${{ github.event.inputs.enable_susfs == 'true' }}
         run: |
           cd kernel
-          SUSFS_OK="false"
-          if [ -d "../susfs4ksu" ]; then
-            cp -rv ../susfs4ksu/kernel_patches/fs/* fs/ || true
-            cp -rv ../susfs4ksu/kernel_patches/include/linux/* include/linux/ || true
-            PATCH_FILE="../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android12-5.10.patch"
-            if [ -f "$PATCH_FILE" ]; then
-              if patch -p1 --dry-run < "$PATCH_FILE" >/dev/null 2>&1; then
-                patch -p1 --forward < "$PATCH_FILE" && SUSFS_OK="true"
-              elif patch -p1 --dry-run --fuzz=1 < "$PATCH_FILE" >/dev/null 2>&1; then
-                patch -p1 --forward --fuzz=1 < "$PATCH_FILE" && SUSFS_OK="true"
-              elif git apply --3way --check "$PATCH_FILE" >/dev/null 2>&1; then
-                git apply --3way "$PATCH_FILE" && SUSFS_OK="true"
-              fi
-              if [ "$SUSFS_OK" = "true" ]; then
-                find KernelSU drivers/kernelsu -name "*.mk" -o -name "Makefile" \
-                  -o -name "Kbuild" 2>/dev/null | \
-                  xargs -I{} sed -i 's/\$(error /\$(warning /g' {} || true
-                git add -A && git commit -m "susfs-applied" || true
-              fi
+          SUSFS_OK=false
+          [ -d "../susfs4ksu" ] || { echo "SUSFS_APPLIED=false" >> $GITHUB_ENV; exit 0; }
+          cp -rv ../susfs4ksu/kernel_patches/fs/* fs/ 2>/dev/null || true
+          cp -rv ../susfs4ksu/kernel_patches/include/linux/* include/linux/ 2>/dev/null || true
+          PF="../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android12-5.10.patch"
+          if [ -f "$PF" ]; then
+            if   patch -p1 --dry-run          < "$PF" >/dev/null 2>&1; then patch -p1 --forward          < "$PF" && SUSFS_OK=true
+            elif patch -p1 --dry-run --fuzz=1 < "$PF" >/dev/null 2>&1; then patch -p1 --forward --fuzz=1 < "$PF" && SUSFS_OK=true
+            elif git apply --3way --check "$PF" >/dev/null 2>&1;         then git apply --3way "$PF"     && SUSFS_OK=true
             fi
           fi
+          [ "$SUSFS_OK" = "true" ] && git add -A && git commit -m "susfs-applied" || true
           echo "SUSFS_APPLIED=$SUSFS_OK" >> $GITHUB_ENV
 
-      - name: Bersihkan Extern Declarations Problematic
+      - name: Bersihkan Extern Declarations
         run: |
           cd kernel
-          python3 - << 'PYEOF'
-import re, os
+          python3 /tmp/clean_externs.py 2>/dev/null || true
+          git add -A && git commit -m "clean-externs" || true
 
-KSU_FUNCS = {
-    "ksu_setup_preinit_file":           "void",
-    "ksu_preinit_handle_post_execveat": "int",
-}
-BAD_MARKERS = [
-    "Safe weak stubs for execveat preinit",
-    "True SELinux passthrough bridges",
-    "execveat preinit",
-    "KSU forward declarations (auto-generated)",
-]
-SELINUX_FILES = ["security/selinux/hooks.c", "security/selinux/selinuxfs.c"]
+      - name: Tulis Script Patches
+        run: |
+          cat > /tmp/clean_externs.py << 'PYEOF'
+          import re, os, sys
+          KSU_FUNCS = {"ksu_setup_preinit_file": "void", "ksu_preinit_handle_post_execveat": "int"}
+          BAD = ["Safe weak stubs","True SELinux passthrough","execveat preinit","KSU forward declarations (auto-generated)"]
+          SEFILES = ["security/selinux/hooks.c","security/selinux/selinuxfs.c"]
+          def find_sig(fn):
+              dr = re.compile(r'(?:^|\n)[ \t]*(void|int|long)\s*\*?\s*'+re.escape(fn)+r'\s*\(([^)]+)\)\s*(?:\{|$)',re.M)
+              for root,dirs,files in os.walk("."):
+                  dirs[:] = [d for d in dirs if d not in [".git","out"]]
+                  for f in files:
+                      if not f.endswith((".c",".h")): continue
+                      fp = os.path.join(root,f)
+                      if os.path.abspath(fp)==os.path.abspath("fs/exec.c"): continue
+                      try: src=open(fp,encoding="utf-8",errors="ignore").read()
+                      except: continue
+                      m=dr.search(src)
+                      if m: return (m.group(1),m.group(2),fp)
+              return None
+          if os.path.isfile("fs/exec.c"):
+              with open("fs/exec.c",encoding="utf-8",errors="replace") as f: raw=f.read()
+              lines=raw.splitlines(keepends=True); out=[]; i=0
+              while i<len(lines):
+                  ln=lines[i]
+                  if any(b in ln for b in BAD): i+=1; continue
+                  if re.search(r'(__attribute__\s*\(\s*\(weak\)\s*\)|__weak)\s[\w\s\*]*ksu_',ln):
+                      if "{" in ln:
+                          d=ln.count("{")-ln.count("}"); i+=1
+                          while i<len(lines) and d>0: d+=lines[i].count("{")-lines[i].count("}"); i+=1
+                      else: i+=1
+                      continue
+                  bad=any(fn in ln and re.search(r'\b(extern|static)\b',ln) for fn in KSU_FUNCS)
+                  if bad:
+                      if ";" in ln or ("{" in ln and "}" in ln): i+=1
+                      elif "{" in ln:
+                          d=ln.count("{")-ln.count("}"); i+=1
+                          while i<len(lines) and d>0: d+=lines[i].count("{")-lines[i].count("}"); i+=1
+                      else:
+                          i+=1
+                          while i<len(lines) and ";" not in lines[i]: i+=1
+                          i+=1
+                      continue
+                  out.append(ln); i+=1
+              content="".join(out)
+              injs=[]
+              for fn,rd in KSU_FUNCS.items():
+                  if not re.search(r'\b'+fn+r'\s*\(',content): continue
+                  r=find_sig(fn)
+                  injs.append(f"extern {r[0] if r else rd} {fn}({r[1] if r else ''});"+"\n")
+              if injs:
+                  ls=content.split("\n"); li=max((i for i,l in enumerate(ls) if l.strip().startswith("#include")),default=-1)
+                  if li>=0: ls.insert(li+1,"\n/* KSU decls */\n"+"".join(injs)); content="\n".join(ls)
+              open("fs/exec.c","w",encoding="utf-8").write(content)
+              print("exec.c patched")
+          for sf in SEFILES:
+              if not os.path.isfile(sf): continue
+              src=open(sf,encoding="utf-8",errors="replace").read()
+              for b in BAD: src=re.sub(r'/\*[^*]*'+re.escape(b)+r'[^*]*\*/',"",src)
+              open(sf,"w",encoding="utf-8").write(src); print(f"{sf} cleaned")
+          PYEOF
 
-def find_real_signature(func_name):
-    def_re = re.compile(
-        r'(?:^|\n)[ \t]*(?:static\s+)?(?:inline\s+)?(?:__\w+\s+)*'
-        r'(void|int|long|bool|unsigned\s+\w+|unsigned)\s*\*?\s*'
-        + re.escape(func_name) + r'\s*\(([^)]+)\)\s*(?:\{|$)', re.MULTILINE)
-    decl_re = re.compile(
-        r'extern\s+(void|int|long|bool|unsigned\s+\w+|unsigned)\s*\*?\s*'
-        + re.escape(func_name) + r'\s*\(([^;)]+)\)\s*;', re.MULTILINE)
-    best_def = best_decl = None
-    for root, dirs, files in os.walk('.'):
-        dirs[:] = [d for d in dirs if d not in ['.git', 'out']]
-        for fname in files:
-            ext = os.path.splitext(fname)[1]
-            if ext not in ('.c', '.h'):
-                continue
-            fpath = os.path.join(root, fname)
-            if os.path.abspath(fpath) == os.path.abspath('fs/exec.c'):
-                continue
-            try:
-                with open(fpath, 'r', encoding='utf-8', errors='ignore') as f:
-                    src = f.read()
-            except Exception:
-                continue
-            if ext == '.h' and best_decl is None:
-                m = decl_re.search(src)
-                if m: best_decl = (m.group(1).strip(), m.group(2).strip(), fpath)
-            if ext == '.c' and best_def is None:
-                m = def_re.search(src)
-                if m:
-                    line_start = src.rfind('\n', 0, m.start()) + 1
-                    if 'extern' not in src[line_start:m.start()]:
-                        best_def = (m.group(1).strip(), m.group(2).strip(), fpath)
-            if best_def and best_decl: break
-        if best_def and best_decl: break
-    return best_decl or best_def
+          cat > /tmp/patch_integrity.py << 'PYEOF'
+          import re, os, sys
+          bypass = sys.argv[1] if len(sys.argv)>1 else "true"
+          if bypass != "true": sys.exit(0)
+          # patch /proc/cmdline
+          f = "fs/proc/cmdline.c"
+          if os.path.isfile(f):
+              src = open(f, encoding="utf-8", errors="replace").read()
+              spoof = """
+          static char *spoof_cmdline(const char *o){
+              static char b[4096]; char *p;
+              strncpy(b,o,sizeof(b)-1); b[sizeof(b)-1]=0;
+              p=strstr(b,"androidboot.verifiedbootstate=orange");
+              if(p) memcpy(p,"androidboot.verifiedbootstate=green ",36);
+              p=strstr(b,"androidboot.vbmeta.device_state=unlocked");
+              if(p) memcpy(p+31,"locked  ",8);
+              return b; }
+          """
+              if "spoof_cmdline" not in src:
+                  ls=src.split("\n"); li=max((i for i,l in enumerate(ls) if l.strip().startswith("#include")),default=0)
+                  ls.insert(li+1, spoof); src="\n".join(ls)
+              src=re.sub(r'seq_puts\(m,\s*saved_command_line\)','seq_puts(m, spoof_cmdline(saved_command_line))',src)
+              open(f,"w",encoding="utf-8").write(src); print(f"{f}: spoofed")
+          # patch dm-verity
+          f = "drivers/md/dm-verity-target.c"
+          if os.path.isfile(f):
+              src = open(f, encoding="utf-8", errors="replace").read()
+              ls=[]; skip=False
+              for l in src.split("\n"):
+                  if "bio->bi_status &&" in l or "verity_fec_is_erasure" in l:
+                      ls.append("\t\tbio->bi_status = BLK_STS_OK; /* bypass */"); continue
+                  if "verity_finish_io(io, bio->bi_status)" in l: continue
+                  ls.append(l)
+              open(f,"w",encoding="utf-8").write("\n".join(ls)); print(f"{f}: bypassed")
+          # patch lockdown
+          f = "security/lockdown/lockdown.c"
+          if os.path.isfile(f):
+              src = open(f, encoding="utf-8", errors="replace").read()
+              src = re.sub(r'(static\s+int\s+lockdown_is_locked_down\s*\([^)]*\)\s*\{)',
+                  r'\1\n\treturn 0; /* bypass */', src)
+              open(f,"w",encoding="utf-8").write(src); print(f"{f}: lockdown bypassed")
+          # patch qcom scm
+          for f in ["drivers/firmware/qcom/qcom_scm.c","drivers/firmware/qcom_scm.c"]:
+              if not os.path.isfile(f): continue
+              src = open(f, encoding="utf-8", errors="replace").read()
+              src = re.sub(r'(int\s+qcom_scm_is_secure_boot_enabled\s*\([^)]*\)\s*\{)',
+                  r'\1\n\treturn 0; /* bypass */', src)
+              open(f,"w",encoding="utf-8").write(src); print(f"{f}: scm bypassed")
+          PYEOF
 
-exec_path = 'fs/exec.c'
-if not os.path.isfile(exec_path):
-    print(">>> fs/exec.c tidak ditemukan, skip"); exit(0)
+          cat > /tmp/patch_bbr2.py << 'PYEOF'
+          import os, sys
+          profile = sys.argv[1] if len(sys.argv)>1 else "bbr2_tuned"
+          if profile == "bbr2_tuned" and not os.path.isfile("net/ipv4/tcp_bbr2.c"):
+              code = """/* TCP BBR2 backport for kernel 5.10 */
+          #include <linux/module.h>
+          #include <net/tcp.h>
+          static struct tcp_congestion_ops tcp_bbr2 __read_mostly = {
+              .flags = TCP_CONG_NON_RESTRICTED, .name = "bbr2",
+              .owner = THIS_MODULE, .init = bbr_init,
+              .cong_control = bbr_main, .sndbuf_expand = bbr_sndbuf_expand,
+              .undo_cwnd = bbr_undo_cwnd, .cwnd_event = bbr_cwnd_event,
+              .ssthresh = bbr_ssthresh, .tso_segs = bbr_tso_segs,
+              .get_info = bbr_get_info, .set_state = bbr_set_state,
+          };
+          static int __init bbr2_reg(void) { return tcp_register_congestion_control(&tcp_bbr2); }
+          static void __exit bbr2_unreg(void) { tcp_unregister_congestion_control(&tcp_bbr2); }
+          module_init(bbr2_reg); module_exit(bbr2_unreg);
+          MODULE_LICENSE("Dual BSD/GPL"); MODULE_DESCRIPTION("TCP BBR v2 backport");
+          """
+              open("net/ipv4/tcp_bbr2.c","w").write(code)
+              mf = open("net/ipv4/Makefile").read()
+              if "tcp_bbr2" not in mf:
+                  open("net/ipv4/Makefile","a").write("obj-$(CONFIG_TCP_CONG_BBR2) += tcp_bbr2.o\n")
+              kc = open("net/ipv4/Kconfig").read()
+              if "TCP_CONG_BBR2" not in kc:
+                  open("net/ipv4/Kconfig","a").write("""
+          config TCP_CONG_BBR2
+          \ttristate "BBR v2 TCP"
+          \tdefault m
+          \thelp
+          \t  BBR v2 backport.
+          """)
+              print("BBR2 added")
+          if os.path.isfile("net/ipv4/tcp_bbr.c"):
+              src = open("net/ipv4/tcp_bbr.c").read()
+              src = src.replace("bbr_min_rtt_win_sec = 10","bbr_min_rtt_win_sec = 5")
+              src = src.replace("bbr_probe_rtt_mode_ms = 200","bbr_probe_rtt_mode_ms = 100")
+              open("net/ipv4/tcp_bbr.c","w").write(src); print("BBR tuned")
+          PYEOF
 
-with open(exec_path, 'r', encoding='utf-8', errors='replace') as f:
-    raw = f.read()
+          cat > /tmp/gen_defconfig.py << 'PYEOF'
+          import sys
+          defconfig    = sys.argv[1]
+          susfs_ok     = sys.argv[2]
+          sec_level    = sys.argv[3]
+          tcp_profile  = sys.argv[4]
+          cpu_gov      = sys.argv[5]
+          enable_lto   = sys.argv[6]
+          full_sec     = sys.argv[7]
+          bypass       = sys.argv[8]
+          dolby        = sys.argv[9]
+          gps          = sys.argv[10]
 
-lines = raw.splitlines(keepends=True)
-out = []; i = 0
-while i < len(lines):
-    line = lines[i]
-    if any(m in line for m in BAD_MARKERS): i += 1; continue
-    if re.search(r'(__attribute__\s*\(\s*\(weak\)\s*\)|__weak)\s[\w\s\*]*ksu_', line):
-        if '{' in line:
-            depth = line.count('{') - line.count('}'); i += 1
-            while i < len(lines) and depth > 0:
-                depth += lines[i].count('{') - lines[i].count('}'); i += 1
-        else: i += 1
-        continue
-    is_bad = any(fn in line and re.search(r'\b(extern|static)\b', line) for fn in KSU_FUNCS)
-    if is_bad:
-        if ';' in line or ('{' in line and '}' in line): i += 1
-        elif '{' in line:
-            depth = line.count('{') - line.count('}'); i += 1
-            while i < len(lines) and depth > 0:
-                depth += lines[i].count('{') - lines[i].count('}'); i += 1
-        else:
-            i += 1
-            while i < len(lines) and ';' not in lines[i]: i += 1
-            i += 1
-        continue
-    out.append(line); i += 1
+          cfg = [
+              # KSU
+              "CONFIG_WERROR=n","CONFIG_KSU=y","CONFIG_KPROBES=y",
+              "CONFIG_HAVE_KPROBES=y","CONFIG_KPROBE_EVENTS=y",
+              # TCP
+              "CONFIG_TCP_CONG_ADVANCED=y","CONFIG_TCP_CONG_BBR=y",
+              "CONFIG_TCP_CONG_CUBIC=y","CONFIG_TCP_CONG_RENO=y",
+              'CONFIG_DEFAULT_TCP_CONG="bbr"',
+              "CONFIG_NET_SCH_FQ=y","CONFIG_NET_SCH_FQ_CODEL=y",
+              "CONFIG_NET_SCH_CAKE=y","CONFIG_SYN_COOKIES=y",
+              # CPU Governors
+              "CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y","CONFIG_CPU_FREQ_GOV_PERFORMANCE=y",
+              "CONFIG_CPU_FREQ_GOV_POWERSAVE=y","CONFIG_CPU_FREQ_GOV_CONSERVATIVE=y",
+              "CONFIG_CPU_FREQ_GOV_USERSPACE=y","CONFIG_CPU_FREQ_STAT=y",
+              # Scheduler
+              "CONFIG_CFS_BANDWIDTH=y","CONFIG_RT_GROUP_SCHED=y",
+              "CONFIG_SCHED_AUTOGROUP=y","CONFIG_PREEMPT=y","CONFIG_HZ_300=y",
+              # Memory
+              "CONFIG_ZSMALLOC=y","CONFIG_ZRAM=y","CONFIG_ZRAM_DEF_COMP_LZ4=y",
+              "CONFIG_TRANSPARENT_HUGEPAGE=y","CONFIG_TRANSPARENT_HUGEPAGE_MADVISE=y",
+              "CONFIG_ZSWAP=y","CONFIG_KSM=y","CONFIG_COMPACTION=y",
+              # I/O
+              "CONFIG_MQ_IOSCHED_DEADLINE=y","CONFIG_MQ_IOSCHED_KYBER=y",
+              "CONFIG_IOSCHED_BFQ=y","CONFIG_BFQ_GROUP_IOSCHED=y",
+              # Security base
+              "CONFIG_SECURITY=y","CONFIG_SECURITY_DMESG_RESTRICT=y",
+              "CONFIG_SECURITY_SELINUX=y","CONFIG_SECURITY_SELINUX_DEVELOP=y",
+              "CONFIG_SECURITY_SELINUX_BOOTPARAM=y",
+              "CONFIG_SECURITY_SELINUX_BOOTPARAM_VALUE=1",
+              "CONFIG_DEFAULT_SECURITY_SELINUX=y",
+              "CONFIG_BPF=y","CONFIG_BPF_SYSCALL=y","CONFIG_BPF_JIT=y",
+              "CONFIG_BPF_JIT_ALWAYS_ON=y","CONFIG_SECCOMP=y","CONFIG_SECCOMP_FILTER=y",
+          ]
 
-content = ''.join(out)
-content = re.sub(
-    r'\n/\* KSU forward declarations \(auto-generated\) \*/\n.*?(?=\n#|\nstatic|\nextern|\nvoid|\nint|\n\n)',
-    '\n', content, flags=re.DOTALL)
+          gov_map = {
+              "schedutil":"CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y",
+              "performance":"CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y",
+              "conservative":"CONFIG_CPU_FREQ_DEFAULT_GOV_CONSERVATIVE=y",
+              "pixel":"CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y",
+          }
+          cfg.append(gov_map.get(cpu_gov,"CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y"))
 
-injections = []
-for fn, ret_default in KSU_FUNCS.items():
-    if not re.search(r'\b' + fn + r'\s*\(', content): continue
-    found = find_real_signature(fn)
-    if found:
-        ret, args, src_path = found
-        decl = f"extern {ret} {fn}({args});\n"
-    else:
-        decl = f"extern {ret_default} {fn}();\n"
-    injections.append(decl)
+          if tcp_profile == "bbr2_tuned":
+              cfg.append("CONFIG_TCP_CONG_BBR2=m")
 
-if injections:
-    lines2 = content.split('\n')
-    last_inc = max((i for i, l in enumerate(lines2) if l.strip().startswith('#include')), default=-1)
-    if last_inc >= 0:
-        block = '\n/* KSU forward declarations (auto-generated) */\n' + ''.join(injections)
-        lines2.insert(last_inc + 1, block)
-        content = '\n'.join(lines2)
+          if enable_lto == "true":
+              cfg += ["CONFIG_LTO=y","CONFIG_LTO_CLANG=y","CONFIG_THINLTO=y","CONFIG_LTO_CLANG_THIN=y"]
 
-with open(exec_path, 'w', encoding='utf-8') as f:
-    f.write(content)
-print(">>> fs/exec.c: surgical patch selesai")
+          if bypass == "true":
+              cfg += [
+                  "# CONFIG_SECURITY_LOCKDOWN_LSM is not set",
+                  "CONFIG_DEVMEM=y","# CONFIG_STRICT_DEVMEM is not set",
+                  "# CONFIG_MODULE_SIG is not set","# CONFIG_MODULE_SIG_FORCE is not set",
+                  "# CONFIG_DM_VERITY_VERIFY_ROOTHASH_SIG is not set",
+              ]
 
-for sf in SELINUX_FILES:
-    if not os.path.isfile(sf): continue
-    with open(sf, 'r', encoding='utf-8', errors='replace') as f:
-        src = f.read()
-    for m in BAD_MARKERS:
-        src = re.sub(r'/\*[^*]*' + re.escape(m) + r'[^*]*\*/', '', src)
-    src = re.sub(r'__attribute__\s*\(\s*\(weak\)\s*\)\s[\w\s\*]*ksu_[^\n]*\n', '', src)
-    with open(sf, 'w', encoding='utf-8') as f:
-        f.write(src)
-    print(f">>> {sf}: cleaned")
-PYEOF
+          if full_sec == "true":
+              cfg += [
+                  # T1: Memory
+                  "CONFIG_INIT_ON_ALLOC_DEFAULT_ON=y","CONFIG_INIT_ON_FREE_DEFAULT_ON=y",
+                  "CONFIG_SLAB_FREELIST_RANDOM=y","CONFIG_SLAB_FREELIST_HARDENED=y",
+                  "CONFIG_SHUFFLE_PAGE_ALLOCATOR=y","CONFIG_FORTIFY_SOURCE=y",
+                  "CONFIG_HARDENED_USERCOPY=y","CONFIG_KFENCE=y",
+                  "CONFIG_VMAP_STACK=y","CONFIG_THREAD_INFO_IN_TASK=y",
+                  "CONFIG_REFCOUNT_FULL=y","CONFIG_PAGE_POISONING=y",
+                  # T2: Hardening
+                  "CONFIG_STACKPROTECTOR=y","CONFIG_STACKPROTECTOR_STRONG=y",
+                  "CONFIG_STRICT_KERNEL_RWX=y","CONFIG_STRICT_MODULE_RWX=y",
+                  "CONFIG_RANDOMIZE_BASE=y","CONFIG_RANDOMIZE_MODULE_REGION_FULL=y",
+                  "CONFIG_LATENT_ENTROPY=y","CONFIG_GCC_PLUGIN_LATENT_ENTROPY=y",
+                  "CONFIG_GCC_PLUGIN_STRUCTLEAK=y","CONFIG_GCC_PLUGIN_STRUCTLEAK_BYREF_ALL=y",
+                  "CONFIG_GCC_PLUGIN_STACKLEAK=y","CONFIG_GCC_PLUGIN_RANDSTRUCT=y",
+                  # T3: ARM64
+                  "CONFIG_ARM64_PTR_AUTH=y","CONFIG_ARM64_PTR_AUTH_KERNEL=y",
+                  "CONFIG_ARM64_BTI=y","CONFIG_ARM64_BTI_KERNEL=y",
+                  "CONFIG_ARM64_MTE=y","CONFIG_SHADOW_CALL_STACK=y",
+                  "CONFIG_ARM64_SW_TTBR0_PAN=y","CONFIG_ARM64_PAN=y",
+                  "CONFIG_UNMAP_KERNEL_AT_EL0=y","CONFIG_HARDEN_BRANCH_PREDICTOR=y",
+                  "CONFIG_MITIGATE_SPECTRE_BRANCH_HISTORY=y",
+                  "CONFIG_CFI_CLANG=y","CONFIG_CFI_PERMISSIVE=n",
+                  # T4: Network
+                  "CONFIG_NETFILTER=y","CONFIG_NF_CONNTRACK=y","CONFIG_NF_TABLES=y",
+                  "CONFIG_NETFILTER_ADVANCED=y","CONFIG_XFRM=y","CONFIG_XFRM_USER=y",
+                  "CONFIG_INET_ESP=y","CONFIG_INET_AH=y","CONFIG_WIREGUARD=y",
+                  "CONFIG_IP_NF_IPTABLES=y","CONFIG_IP_NF_FILTER=y",
+                  "CONFIG_IP6_NF_IPTABLES=y","CONFIG_IP6_NF_FILTER=y",
+                  # T5: eBPF
+                  "CONFIG_BPF_EVENTS=y","CONFIG_BPF_LSM=y","CONFIG_SECURITY_BPFLSM=y",
+                  "CONFIG_BPF_STREAM_PARSER=y",
+                  # T6: Crypto
+                  "CONFIG_CRYPTO_AES=y","CONFIG_CRYPTO_AES_ARM64_CE=y",
+                  "CONFIG_CRYPTO_CHACHA20POLY1305=y","CONFIG_CRYPTO_SHA256_ARM64=y",
+                  "CONFIG_CRYPTO_SHA3_ARM64=y","CONFIG_CRYPTO_BLAKE2S=y",
+                  "CONFIG_CRYPTO_GCM=y","CONFIG_CRYPTO_DRBG=y",
+                  "CONFIG_CRYPTO_DRBG_HMAC=y","CONFIG_CRYPTO_JITTERENTROPY=y",
+                  "CONFIG_HW_RANDOM=y","CONFIG_HW_RANDOM_QCOM=y",
+                  "# CONFIG_CRYPTO_MD5 is not set",
+                  "# CONFIG_CRYPTO_DES is not set","# CONFIG_CRYPTO_RC4 is not set",
+                  # T7: Audit+IMA
+                  "CONFIG_AUDIT=y","CONFIG_AUDITSYSCALL=y","CONFIG_AUDIT_WATCH=y",
+                  "CONFIG_INTEGRITY=y","CONFIG_IMA=y","CONFIG_IMA_APPRAISE=y",
+                  "CONFIG_EVM=y",
+                  # T8: Process
+                  "CONFIG_SECURITY_YAMA=y","CONFIG_NAMESPACES=y",
+                  "CONFIG_USER_NS=y","CONFIG_PID_NS=y","CONFIG_NET_NS=y",
+                  "CONFIG_CGROUPS=y","CONFIG_CGROUP_BPF=y","CONFIG_MEMCG=y",
+                  "CONFIG_BLK_CGROUP=y","CONFIG_CPUSETS=y",
+                  # Android
+                  "CONFIG_ANDROID_PARANOID_NETWORK=y","CONFIG_ANDROID_BINDER_IPC=y",
+                  "CONFIG_TRUSTED_KEYS=y","CONFIG_ENCRYPTED_KEYS=y",
+                  "CONFIG_FS_ENCRYPTION=y","CONFIG_FS_VERITY=y",
+                  "CONFIG_DM_CRYPT=y","CONFIG_DM_INTEGRITY=y","CONFIG_DM_VERITY=y",
+              ]
+
+          if gps == "true":
+              cfg += ["CONFIG_GNSS=y","CONFIG_GNSS_SERIAL=y","CONFIG_QCOM_GENI_SE=y"]
+
+          if dolby == "true":
+              cfg += [
+                  "CONFIG_SND_SOC_COMPRESS=y","CONFIG_SND_COMPRESS_OFFLOAD=y",
+                  "CONFIG_SND_SOC_WCD938X=y","CONFIG_SND_PCM_OSS=y",
+              ]
+
+          susfs_cfg = [
+              "CONFIG_KSU_SUSFS=y","CONFIG_KSU_SUSFS_SUS_PATH=y",
+              "CONFIG_KSU_SUSFS_SUS_MOUNT=y","CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y",
+              "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y","CONFIG_KSU_SUSFS_SUS_KSTAT=y",
+              "CONFIG_KSU_SUSFS_TRY_UMOUNT=y","CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y",
+              "CONFIG_KSU_SUSFS_SPOOF_UNAME=y","CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y",
+              "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y",
+              "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y","CONFIG_KSU_SUSFS_SUS_SU=n",
+          ]
+
+          with open(defconfig,"a",encoding="utf-8") as f:
+              f.write("\n# === MARBLE FULL POWER ===\n")
+              for c in cfg: f.write(c+"\n")
+              if susfs_ok == "true":
+                  f.write("\n# === SuSFS ===\n")
+                  for c in susfs_cfg: f.write(c+"\n")
+                  f.write("CONFIG_KSU_SUSFS_ENABLE_LOG=n\n" if sec_level=="maximum_stealth"
+                          else "CONFIG_KSU_SUSFS_ENABLE_LOG=y\n")
+              else:
+                  f.write("CONFIG_KSU_SUSFS=n\n")
+          print(f">>> {len(cfg)} configs written to defconfig")
+          PYEOF
+
+          echo ">>> Script files written"
+
+      - name: Run Bersihkan Extern
+        run: |
+          cd kernel
+          python3 /tmp/clean_externs.py || true
           git add -A && git commit -m "clean-externs-surgical" || true
 
-      # ═══════════════════════════════════════════════════════════════════════
-      # FULL SECURITY PATCHES - TIER 1: MEMORY HARDENING
-      # ═══════════════════════════════════════════════════════════════════════
-      - name: Patch Memory Security (Tier 1)
-        if: ${{ github.event.inputs.enable_full_security == 'true' }}
-        run: |
-          cd kernel
-
-          # INIT_ON_ALLOC + INIT_ON_FREE di mm/slab_common.c
-          for slab_file in mm/slab_common.c mm/slub.c mm/slab.c; do
-            [ -f "$slab_file" ] || continue
-            python3 - "$slab_file" << 'PYEOF'
-import sys, re
-path = sys.argv[1]
-with open(path, 'r', encoding='utf-8', errors='replace') as f:
-    src = f.read()
-# ensure zero-init on allocation paths
-src = re.sub(r'(kmalloc\([^)]+\))', r'\1 /* zero-init enforced via CONFIG */', src, count=1)
-with open(path, 'w', encoding='utf-8') as f:
-    f.write(src)
-print(f">>> {path}: zero-init annotated")
-PYEOF
-          done
-
-          # STACKLEAK - zero kernel stack between syscalls
-          if [ -f "kernel/fork.c" ]; then
-            python3 - << 'PYEOF'
-import re
-path = "kernel/fork.c"
-with open(path, 'r', encoding='utf-8', errors='replace') as f:
-    src = f.read()
-# mark for stackleak enablement via config
-if 'stackleak' not in src.lower():
-    src = src.replace(
-        '#include <linux/init.h>',
-        '#include <linux/init.h>\n/* STACKLEAK: enabled via CONFIG_GCC_PLUGIN_STACKLEAK */'
-    )
-with open(path, 'w', encoding='utf-8') as f:
-    f.write(src)
-print(">>> kernel/fork.c: stackleak annotation added")
-PYEOF
-          fi
-
-          # HARDENED_USERCOPY checks
-          if [ -f "mm/usercopy.c" ]; then
-            python3 - << 'PYEOF'
-import re
-path = "mm/usercopy.c"
-with open(path, 'r', encoding='utf-8', errors='replace') as f:
-    src = f.read()
-# strengthen usercopy checks
-src = re.sub(
-    r'(#define\s+OBJECT_SIZE_MAX\s+)\d+',
-    r'\g<1>1073741824 /* 1GB max usercopy */',
-    src
-)
-with open(path, 'w', encoding='utf-8') as f:
-    f.write(src)
-print(">>> mm/usercopy.c: hardened usercopy tuned")
-PYEOF
-          fi
-
-          git add -A && git commit -m "memory-security-tier1" || true
-
-      # ═══════════════════════════════════════════════════════════════════════
-      # TIER 2: KERNEL HARDENING (GRSecurity-style)
-      # ═══════════════════════════════════════════════════════════════════════
-      - name: Patch Kernel Hardening (Tier 2)
-        if: ${{ github.event.inputs.enable_full_security == 'true' }}
-        run: |
-          cd kernel
-
-          # KASLR entropy boost
-          if [ -f "arch/arm64/kernel/kaslr.c" ]; then
-            python3 - << 'PYEOF'
-import re
-path = "arch/arm64/kernel/kaslr.c"
-with open(path, 'r', encoding='utf-8', errors='replace') as f:
-    src = f.read()
-# increase KASLR entropy bits
-src = re.sub(
-    r'(#define\s+KASLR_OFFSET_MASK\s+).*',
-    r'\g<1>((1UL << 21) - 1) /* max KASLR entropy */',
-    src
-)
-with open(path, 'w', encoding='utf-8') as f:
-    f.write(src)
-print(">>> arch/arm64/kernel/kaslr.c: KASLR entropy maximized")
-PYEOF
-          fi
-
-          # REFCOUNT_FULL hardening
-          if [ -f "include/linux/refcount.h" ]; then
-            sed -i 's/CONFIG_REFCOUNT_FULL is not set/CONFIG_REFCOUNT_FULL=y/g' \
-              include/linux/refcount.h || true
-          fi
-
-          # VMAP_STACK - virtual mapped stacks
-          if [ -f "arch/arm64/kernel/process.c" ]; then
-            python3 - << 'PYEOF'
-import re
-path = "arch/arm64/kernel/process.c"
-with open(path, 'r', encoding='utf-8', errors='replace') as f:
-    src = f.read()
-# ensure stack overflow detection via vmap stacks
-if 'VMAP_STACK' not in src:
-    src = '/* VMAP_STACK enabled via CONFIG_VMAP_STACK */\n' + src
-with open(path, 'w', encoding='utf-8') as f:
-    f.write(src)
-print(">>> process.c: VMAP_STACK annotation added")
-PYEOF
-          fi
-
-          # PAGE POISONING
-          if [ -f "mm/page_poison.c" ]; then
-            python3 - << 'PYEOF'
-import re
-path = "mm/page_poison.c"
-with open(path, 'r', encoding='utf-8', errors='replace') as f:
-    src = f.read()
-# use 0xAA poison pattern (more detectable)
-src = re.sub(
-    r'(PAGE_POISON\s*=\s*)0x[0-9a-fA-F]+',
-    r'\g<1>0xAA',
-    src
-)
-with open(path, 'w', encoding='utf-8') as f:
-    f.write(src)
-print(">>> mm/page_poison.c: poison pattern set to 0xAA")
-PYEOF
-          fi
-
-          git add -A && git commit -m "kernel-hardening-tier2" || true
-
-      # ═══════════════════════════════════════════════════════════════════════
-      # TIER 3: ARM64 HARDWARE SECURITY (PAC + BTI + MTE)
-      # ═══════════════════════════════════════════════════════════════════════
-      - name: Patch ARM64 Hardware Security (Tier 3)
-        if: ${{ github.event.inputs.enable_full_security == 'true' }}
-        run: |
-          cd kernel
-
-          # PAC (Pointer Authentication Code) enforcement
-          if [ -f "arch/arm64/kernel/entry.S" ]; then
-            python3 - << 'PYEOF'
-import re
-path = "arch/arm64/kernel/entry.S"
-with open(path, 'r', encoding='utf-8', errors='replace') as f:
-    src = f.read()
-# PAC is enabled via CONFIG - annotate enforcement point
-if 'pac_enable' not in src.lower() and 'COMMENT_PAC' not in src:
-    src = '/* PAC: CONFIG_ARM64_PTR_AUTH=y enforced */\n' + src
-    src = '/* BTI: CONFIG_ARM64_BTI_KERNEL=y enforced */\n' + src
-with open(path, 'w', encoding='utf-8') as f:
-    f.write(src)
-print(">>> entry.S: PAC+BTI enforcement annotated")
-PYEOF
-          fi
-
-          # MTE (Memory Tagging Extension) setup for SM7475
-          if [ -f "arch/arm64/kernel/mte.c" ]; then
-            python3 - << 'PYEOF'
-import re
-path = "arch/arm64/kernel/mte.c"
-with open(path, 'r', encoding='utf-8', errors='replace') as f:
-    src = f.read()
-# enable MTE for all userspace allocations
-src = re.sub(
-    r'(mte_enable_kernel\s*\([^)]*\))',
-    r'/* MTE enabled for SM7475 */ \g<1>',
-    src
-)
-with open(path, 'w', encoding='utf-8') as f:
-    f.write(src)
-print(">>> arch/arm64/kernel/mte.c: MTE enforcement for SM7475")
-PYEOF
-          fi
-
-          # ShadowCallStack (ARM64 hardware shadow stack)
-          if [ -f "arch/arm64/include/asm/scs.h" ]; then
-            python3 - << 'PYEOF'
-path = "arch/arm64/include/asm/scs.h"
-with open(path, 'r', encoding='utf-8', errors='replace') as f:
-    src = f.read()
-if 'SCS_ENABLED' not in src:
-    src = '/* Shadow Call Stack: CONFIG_SHADOW_CALL_STACK=y */\n' + src
-with open(path, 'w', encoding='utf-8') as f:
-    f.write(src)
-print(">>> asm/scs.h: ShadowCallStack annotation added")
-PYEOF
-          fi
-
-          # Spectre/Meltdown mitigations check
-          if [ -f "arch/arm64/kernel/cpu_errata.c" ]; then
-            python3 - << 'PYEOF'
-import re
-path = "arch/arm64/kernel/cpu_errata.c"
-with open(path, 'r', encoding='utf-8', errors='replace') as f:
-    src = f.read()
-# ensure all errata are not bypassed
-src = re.sub(
-    r'(needs_kpti\s*=\s*)false',
-    r'\g<1>true /* force KPTI */',
-    src
-)
-with open(path, 'w', encoding='utf-8') as f:
-    f.write(src)
-print(">>> cpu_errata.c: KPTI enforcement checked")
-PYEOF
-          fi
-
-          git add -A && git commit -m "arm64-hardware-security-tier3" || true
-
-      # ═══════════════════════════════════════════════════════════════════════
-      # TIER 4: NETWORK SECURITY FULL STACK
-      # ═══════════════════════════════════════════════════════════════════════
-      - name: Patch Network Security (Tier 4)
-        if: ${{ github.event.inputs.enable_full_security == 'true' }}
-        run: |
-          cd kernel
-
-          # Netfilter hardening
-          if [ -f "net/netfilter/nf_conntrack_core.c" ]; then
-            python3 - << 'PYEOF'
-import re
-path = "net/netfilter/nf_conntrack_core.c"
-with open(path, 'r', encoding='utf-8', errors='replace') as f:
-    src = f.read()
-# increase conntrack table size
-src = re.sub(
-    r'(nf_conntrack_htable_size\s*=\s*)\d+',
-    r'\g<1>65536 /* security: larger conntrack table */',
-    src
-)
-# tighten conntrack timeout
-src = re.sub(
-    r'(nf_conntrack_generic_timeout\s*=\s*)\d+',
-    r'\g<1>120 /* 2 min generic timeout */',
-    src
-)
-with open(path, 'w', encoding='utf-8') as f:
-    f.write(src)
-print(">>> nf_conntrack_core.c: hardened")
-PYEOF
-          fi
-
-          # TCP hardening - RFC5961
-          if [ -f "net/ipv4/tcp_input.c" ]; then
-            python3 - << 'PYEOF'
-import re
-path = "net/ipv4/tcp_input.c"
-with open(path, 'r', encoding='utf-8', errors='replace') as f:
-    src = f.read()
-# enable RFC5961 by default
-src = re.sub(
-    r'(sysctl_tcp_challenge_ack_limit\s*=\s*)\d+',
-    r'\g<1>1000 /* RFC5961: rate limit challenge ACKs */',
-    src
-)
-with open(path, 'w', encoding='utf-8') as f:
-    f.write(src)
-print(">>> tcp_input.c: RFC5961 hardened")
-PYEOF
-          fi
-
-          # XDP/BPF firewall hook
-          if [ -f "net/core/filter.c" ]; then
-            python3 - << 'PYEOF'
-import re
-path = "net/core/filter.c"
-with open(path, 'r', encoding='utf-8', errors='replace') as f:
-    src = f.read()
-# BPF JIT hardening comment
-if 'jit_harden' not in src:
-    src = '/* BPF_JIT_HARDEN: enabled via sysctl net.core.bpf_jit_harden=2 */\n' + src
-with open(path, 'w', encoding='utf-8') as f:
-    f.write(src)
-print(">>> net/core/filter.c: BPF JIT hardening noted")
-PYEOF
-          fi
-
-          # IPv6 security - disable RA acceptance by default
-          if [ -f "net/ipv6/addrconf.c" ]; then
-            python3 - << 'PYEOF'
-import re
-path = "net/ipv6/addrconf.c"
-with open(path, 'r', encoding='utf-8', errors='replace') as f:
-    src = f.read()
-# disable RA by default for security
-src = re.sub(
-    r'(\.accept_ra\s*=\s*)\d+',
-    r'\g<1>0 /* security: disable RA by default */',
-    src
-)
-with open(path, 'w', encoding='utf-8') as f:
-    f.write(src)
-print(">>> addrconf.c: IPv6 RA disabled by default")
-PYEOF
-          fi
-
-          git add -A && git commit -m "network-security-tier4" || true
-
-      # ═══════════════════════════════════════════════════════════════════════
-      # TIER 5: eBPF SECURITY + LSM
-      # ═══════════════════════════════════════════════════════════════════════
-      - name: Patch eBPF Security & BPF LSM (Tier 5)
-        if: ${{ github.event.inputs.enable_full_security == 'true' }}
-        run: |
-          cd kernel
-
-          # BPF LSM attachment hardening
-          if [ -f "kernel/bpf/bpf_lsm.c" ]; then
-            python3 - << 'PYEOF'
-import re
-path = "kernel/bpf/bpf_lsm.c"
-with open(path, 'r', encoding='utf-8', errors='replace') as f:
-    src = f.read()
-# ensure BPF LSM hooks are all enabled
-if 'bpf_lsm_security' not in src:
-    src = '/* BPF_LSM: full hook coverage enabled */\n' + src
-with open(path, 'w', encoding='utf-8') as f:
-    f.write(src)
-print(">>> bpf_lsm.c: BPF LSM hardened")
-PYEOF
-          fi
-
-          # Seccomp strict mode enforcement
-          if [ -f "kernel/seccomp.c" ]; then
-            python3 - << 'PYEOF'
-import re
-path = "kernel/seccomp.c"
-with open(path, 'r', encoding='utf-8', errors='replace') as f:
-    src = f.read()
-# add SECCOMP_NOTIFY support annotation
-if 'SECCOMP_NOTIFY' not in src:
-    src = '/* SECCOMP_FILTER_FLAG_NEW_LISTENER: enabled */\n' + src
-with open(path, 'w', encoding='utf-8') as f:
-    f.write(src)
-print(">>> kernel/seccomp.c: seccomp notify ready")
-PYEOF
-          fi
-
-          # BPF unprivileged restriction
-          if [ -f "kernel/bpf/syscall.c" ]; then
-            python3 - << 'PYEOF'
-import re
-path = "kernel/bpf/syscall.c"
-with open(path, 'r', encoding='utf-8', errors='replace') as f:
-    src = f.read()
-# restrict unprivileged BPF by default
-src = re.sub(
-    r'(sysctl_unprivileged_bpf_disabled\s*=\s*)\d+',
-    r'\g<1>2 /* permanently disable unprivileged BPF */',
-    src
-)
-with open(path, 'w', encoding='utf-8') as f:
-    f.write(src)
-print(">>> bpf/syscall.c: unprivileged BPF permanently disabled")
-PYEOF
-          fi
-
-          git add -A && git commit -m "ebpf-lsm-security-tier5" || true
-
-      # ═══════════════════════════════════════════════════════════════════════
-      # TIER 6: CRYPTO HARDENING
-      # ═══════════════════════════════════════════════════════════════════════
-      - name: Patch Crypto Security (Tier 6)
-        if: ${{ github.event.inputs.enable_full_security == 'true' }}
-        run: |
-          cd kernel
-
-          # Crypto RNG hardening
-          if [ -f "crypto/rng.c" ]; then
-            python3 - << 'PYEOF'
-import re
-path = "crypto/rng.c"
-with open(path, 'r', encoding='utf-8', errors='replace') as f:
-    src = f.read()
-if 'rng_hardened' not in src:
-    src = '/* CRYPTO_RNG: hardened PRNG seeding enforced */\n' + src
-with open(path, 'w', encoding='utf-8') as f:
-    f.write(src)
-print(">>> crypto/rng.c: RNG hardened")
-PYEOF
-          fi
-
-          # Disable weak algorithms
-          if [ -f "crypto/md5.c" ]; then
-            python3 - << 'PYEOF'
-import re
-path = "crypto/md5.c"
-with open(path, 'r', encoding='utf-8', errors='replace') as f:
-    src = f.read()
-# add deprecation warning for MD5
-if 'DEPRECATED' not in src:
-    src = '/* MD5: DEPRECATED - use SHA256+ instead */\n' + src
-with open(path, 'w', encoding='utf-8') as f:
-    f.write(src)
-print(">>> crypto/md5.c: deprecation noted")
-PYEOF
-          fi
-
-          # Enhance getrandom() entropy
-          if [ -f "drivers/char/random.c" ]; then
-            python3 - << 'PYEOF'
-import re
-path = "drivers/char/random.c"
-with open(path, 'r', encoding='utf-8', errors='replace') as f:
-    src = f.read()
-# increase entropy pool input rate
-src = re.sub(
-    r'(#define\s+POOL_BITS\s+)\d+',
-    r'\g<1>512 /* max entropy pool */',
-    src
-)
-with open(path, 'w', encoding='utf-8') as f:
-    f.write(src)
-print(">>> drivers/char/random.c: entropy pool maximized")
-PYEOF
-          fi
-
-          git add -A && git commit -m "crypto-security-tier6" || true
-
-      # ═══════════════════════════════════════════════════════════════════════
-      # TIER 7: AUDIT & INTEGRITY (IMA/EVM)
-      # ═══════════════════════════════════════════════════════════════════════
-      - name: Patch Audit & Integrity (Tier 7)
-        if: ${{ github.event.inputs.enable_full_security == 'true' }}
-        run: |
-          cd kernel
-
-          # IMA policy hardening
-          if [ -f "security/integrity/ima/ima_policy.c" ]; then
-            python3 - << 'PYEOF'
-import re
-path = "security/integrity/ima/ima_policy.c"
-with open(path, 'r', encoding='utf-8', errors='replace') as f:
-    src = f.read()
-# add appraisal for all executables
-if 'ima_appraise' not in src.lower():
-    src = '/* IMA_APPRAISE: enforce via CONFIG_IMA_APPRAISE */\n' + src
-with open(path, 'w', encoding='utf-8') as f:
-    f.write(src)
-print(">>> ima_policy.c: IMA appraisal noted")
-PYEOF
-          fi
-
-          # Audit subsystem hardening
-          if [ -f "kernel/audit.c" ]; then
-            python3 - << 'PYEOF'
-import re
-path = "kernel/audit.c"
-with open(path, 'r', encoding='utf-8', errors='replace') as f:
-    src = f.read()
-# increase audit backlog
-src = re.sub(
-    r'(audit_backlog_limit\s*=\s*)\d+',
-    r'\g<1>8192 /* security: large audit backlog */',
-    src
-)
-with open(path, 'w', encoding='utf-8') as f:
-    f.write(src)
-print(">>> kernel/audit.c: backlog limit increased")
-PYEOF
-          fi
-
-          git add -A && git commit -m "audit-integrity-tier7" || true
-
-      # ═══════════════════════════════════════════════════════════════════════
-      # TIER 8: PROCESS & NAMESPACE SECURITY
-      # ═══════════════════════════════════════════════════════════════════════
-      - name: Patch Process Security (Tier 8)
-        if: ${{ github.event.inputs.enable_full_security == 'true' }}
-        run: |
-          cd kernel
-
-          # Yama ptrace scope - default to 1 (restricted)
-          if [ -f "security/yama/yama_lsm.c" ]; then
-            python3 - << 'PYEOF'
-import re
-path = "security/yama/yama_lsm.c"
-with open(path, 'r', encoding='utf-8', errors='replace') as f:
-    src = f.read()
-src = re.sub(
-    r'(ptrace_scope\s*=\s*)\d+',
-    r'\g<1>1 /* restrict ptrace to parent */',
-    src
-)
-with open(path, 'w', encoding='utf-8') as f:
-    f.write(src)
-print(">>> yama_lsm.c: ptrace_scope=1 set")
-PYEOF
-          fi
-
-          # Namespace restrictions
-          if [ -f "kernel/user_namespace.c" ]; then
-            python3 - << 'PYEOF'
-import re
-path = "kernel/user_namespace.c"
-with open(path, 'r', encoding='utf-8', errors='replace') as f:
-    src = f.read()
-# limit user namespace nesting
-src = re.sub(
-    r'(#define\s+MAX_USER_NAMESPACES\s+)\d+',
-    r'\g<1>16 /* limit namespace nesting */',
-    src
-)
-with open(path, 'w', encoding='utf-8') as f:
-    f.write(src)
-print(">>> user_namespace.c: nesting limited")
-PYEOF
-          fi
-
-          # capabilities hardening
-          if [ -f "kernel/capability.c" ]; then
-            python3 - << 'PYEOF'
-import re
-path = "kernel/capability.c"
-with open(path, 'r', encoding='utf-8', errors='replace') as f:
-    src = f.read()
-if 'cap_hardened' not in src:
-    src = '/* CAPABILITIES: full audit via CONFIG_AUDIT */\n' + src
-with open(path, 'w', encoding='utf-8') as f:
-    f.write(src)
-print(">>> capability.c: capabilities hardened")
-PYEOF
-          fi
-
-          git add -A && git commit -m "process-namespace-security-tier8" || true
-
-      # ═══════════════════════════════════════════════════════════════════════
-      # INTEGRITY BYPASS (tetap ada untuk root/nethunter)
-      # ═══════════════════════════════════════════════════════════════════════
-      - name: Patch Integrity Bypass (Kernel Level)
+      - name: Run Integrity Bypass Patches
         if: ${{ github.event.inputs.enable_integrity_bypass == 'true' }}
         run: |
           cd kernel
-
-          # /proc/cmdline spoof
-          if [ -f "fs/proc/cmdline.c" ]; then
-            python3 - << 'PYEOF'
-import re
-path = "fs/proc/cmdline.c"
-with open(path, 'r', encoding='utf-8', errors='replace') as f:
-    src = f.read()
-
-spoof_fn = '''
-/* integrity-bypass: spoof boot state */
-static char *spoof_cmdline(const char *orig)
-{
-    static char buf[4096];
-    char *p;
-    strncpy(buf, orig, sizeof(buf) - 1);
-    buf[sizeof(buf) - 1] = '\\0';
-    p = strstr(buf, "androidboot.verifiedbootstate=orange");
-    if (p) memcpy(p, "androidboot.verifiedbootstate=green ", 36);
-    p = strstr(buf, "androidboot.verifiedbootstate=red   ");
-    if (p) memcpy(p, "androidboot.verifiedbootstate=green ", 36);
-    p = strstr(buf, "androidboot.vbmeta.device_state=unlocked");
-    if (p) memcpy(p + 31, "locked  ", 8);
-    p = strstr(buf, "androidboot.flash.locked=0");
-    if (p) p[25] = '1';
-    return buf;
-}
-'''
-
-if 'spoof_cmdline' not in src:
-    lines = src.split('\n')
-    last_inc = max((i for i, l in enumerate(lines)
-                   if l.strip().startswith('#include')), default=0)
-    lines.insert(last_inc + 1, spoof_fn)
-    src = '\n'.join(lines)
-
-src = re.sub(
-    r'seq_puts\(m,\s*saved_command_line\)',
-    'seq_puts(m, spoof_cmdline(saved_command_line))',
-    src
-)
-src = re.sub(
-    r'seq_printf\(m,\s*"%s\\n",\s*saved_command_line\)',
-    'seq_printf(m, "%s\\n", spoof_cmdline(saved_command_line))',
-    src
-)
-with open(path, 'w', encoding='utf-8') as f:
-    f.write(src)
-print(">>> fs/proc/cmdline.c: boot state spoofed")
-PYEOF
-          fi
-
-          # dm-verity bypass
-          if [ -f "drivers/md/dm-verity-target.c" ]; then
-            python3 - << 'PYEOF'
-path = "drivers/md/dm-verity-target.c"
-with open(path, 'r', encoding='utf-8', errors='replace') as f:
-    src = f.read()
-
-lines = src.split('\n')
-out = []
-for line in lines:
-    if 'bio->bi_status &&' in line or 'verity_fec_is_erasure' in line:
-        out.append('\t\t/* bypass: verity check disabled */')
-        out.append('\t\tbio->bi_status = BLK_STS_OK;')
-        continue
-    if 'verity_finish_io(io, bio->bi_status)' in line:
-        continue
-    out.append(line)
-
-with open(path, 'w', encoding='utf-8') as f:
-    f.write('\n'.join(out))
-print(">>> dm-verity-target.c: bypass patched")
-PYEOF
-          fi
-
-          # Qualcomm SCM bypass
-          for scm_file in drivers/firmware/qcom/qcom_scm.c \
-                          drivers/firmware/qcom_scm.c; do
-            [ -f "$scm_file" ] || continue
-            python3 - "$scm_file" << 'PYEOF'
-import sys, re
-path = sys.argv[1]
-with open(path, 'r', encoding='utf-8', errors='replace') as f:
-    src = f.read()
-src = re.sub(
-    r'(int\s+qcom_scm_is_secure_boot_enabled\s*\([^)]*\)\s*\{)',
-    r'\1\n\treturn 0; /* bypass */',
-    src
-)
-with open(path, 'w', encoding='utf-8') as f:
-    f.write(src)
-print(f">>> {path}: SCM bypass patched")
-PYEOF
-          done
-
-          # Lockdown bypass
-          if [ -f "security/lockdown/lockdown.c" ]; then
-            python3 - << 'PYEOF'
-import re
-path = "security/lockdown/lockdown.c"
-with open(path, 'r', encoding='utf-8', errors='replace') as f:
-    src = f.read()
-src = re.sub(
-    r'(static\s+int\s+lockdown_is_locked_down\s*\([^)]*\)\s*\{)',
-    r'\1\n\treturn 0; /* bypass */',
-    src
-)
-with open(path, 'w', encoding='utf-8') as f:
-    f.write(src)
-print(">>> lockdown.c: bypass patched")
-PYEOF
-          fi
-
+          python3 /tmp/patch_integrity.py "${{ github.event.inputs.enable_integrity_bypass }}"
           git add -A && git commit -m "integrity-bypass" || true
 
-      # ═══════════════════════════════════════════════════════════════════════
-      # TCP BBR v2
-      # ═══════════════════════════════════════════════════════════════════════
-      - name: Patch TCP BBR v2
+      - name: Run TCP BBR2
         run: |
           cd kernel
-          TCP_PROFILE="${{ github.event.inputs.tcp_profile }}"
-          if [ "$TCP_PROFILE" = "bbr2_tuned" ] && [ ! -f "net/ipv4/tcp_bbr2.c" ]; then
-            cat > net/ipv4/tcp_bbr2.c << 'CEOF'
-/* TCP BBR v2 backport for kernel 5.10 */
-#include <linux/module.h>
-#include <net/tcp.h>
-
-static struct tcp_congestion_ops tcp_bbr2_cong_ops __read_mostly = {
-    .flags        = TCP_CONG_NON_RESTRICTED,
-    .name         = "bbr2",
-    .owner        = THIS_MODULE,
-    .init         = bbr_init,
-    .cong_control = bbr_main,
-    .sndbuf_expand = bbr_sndbuf_expand,
-    .undo_cwnd    = bbr_undo_cwnd,
-    .cwnd_event   = bbr_cwnd_event,
-    .ssthresh     = bbr_ssthresh,
-    .tso_segs     = bbr_tso_segs,
-    .get_info     = bbr_get_info,
-    .set_state    = bbr_set_state,
-};
-
-static int __init bbr2_register(void)
-{
-    return tcp_register_congestion_control(&tcp_bbr2_cong_ops);
-}
-static void __exit bbr2_unregister(void)
-{
-    tcp_unregister_congestion_control(&tcp_bbr2_cong_ops);
-}
-module_init(bbr2_register);
-module_exit(bbr2_unregister);
-MODULE_LICENSE("Dual BSD/GPL");
-MODULE_DESCRIPTION("TCP BBR v2 backport");
-CEOF
-            grep -q "tcp_bbr2" net/ipv4/Makefile || \
-              echo 'obj-$(CONFIG_TCP_CONG_BBR2) += tcp_bbr2.o' >> net/ipv4/Makefile
-            grep -q "TCP_CONG_BBR2" net/ipv4/Kconfig || cat >> net/ipv4/Kconfig << 'KEOF'
-
-config TCP_CONG_BBR2
-	tristate "BBR v2 TCP"
-	default m
-	help
-	  TCP BBR v2 congestion control.
-KEOF
-          fi
-          if [ -f "net/ipv4/tcp_bbr.c" ]; then
-            sed -i 's/bbr_min_rtt_win_sec = 10/bbr_min_rtt_win_sec = 5/g' net/ipv4/tcp_bbr.c || true
-            sed -i 's/bbr_probe_rtt_mode_ms = 200/bbr_probe_rtt_mode_ms = 100/g' net/ipv4/tcp_bbr.c || true
-          fi
+          python3 /tmp/patch_bbr2.py "${{ github.event.inputs.tcp_profile }}"
           git add -A && git commit -m "tcp-bbr2" || true
 
-      # ═══════════════════════════════════════════════════════════════════════
-      # CPU GOVERNOR + PERFORMANCE
-      # ═══════════════════════════════════════════════════════════════════════
-      - name: Patch CPU Governor & Performance
+      - name: Patch CPU Performance & Stability
         run: |
           cd kernel
-          # Schedutil tuning
-          if [ -f "kernel/sched/cpufreq_schedutil.c" ]; then
-            sed -i 's/up_rate_limit_us = [0-9]*/up_rate_limit_us = 500/g' \
-              kernel/sched/cpufreq_schedutil.c || true
-            sed -i 's/down_rate_limit_us = [0-9]*/down_rate_limit_us = 2000/g' \
-              kernel/sched/cpufreq_schedutil.c || true
-          fi
-          # Scheduler latency tuning
-          if [ -f "kernel/sched/fair.c" ]; then
-            sed -i 's/6000000ULL/4000000ULL/g' kernel/sched/fair.c || true
-          fi
-          # I/O tuning
-          if [ -f "block/mq-deadline.c" ]; then
-            sed -i 's/dd->fifo_batch = [0-9]*/dd->fifo_batch = 8/g' block/mq-deadline.c || true
-          fi
-          # Memory tuning
-          if [ -f "mm/vmscan.c" ]; then
-            sed -i 's/vm_swappiness = [0-9]*/vm_swappiness = 100/g' mm/vmscan.c || true
-          fi
-          git add -A && git commit -m "cpu-perf-tuning" || true
+          [ -f "kernel/sched/cpufreq_schedutil.c" ] && {
+            sed -i "s/up_rate_limit_us = [0-9]*/up_rate_limit_us = 500/g" kernel/sched/cpufreq_schedutil.c || true
+            sed -i "s/down_rate_limit_us = [0-9]*/down_rate_limit_us = 2000/g" kernel/sched/cpufreq_schedutil.c || true
+          }
+          [ -f "kernel/sched/fair.c" ] && sed -i "s/6000000ULL/4000000ULL/g" kernel/sched/fair.c || true
+          [ -f "mm/vmscan.c" ] && sed -i "s/vm_swappiness = 60/vm_swappiness = 100/g" mm/vmscan.c || true
+          [ -f "block/mq-deadline.c" ] && sed -i "s/dd->fifo_batch = [0-9]*/dd->fifo_batch = 8/g" block/mq-deadline.c || true
+          git add -A && git commit -m "perf-tuning" || true
 
-      # ═══════════════════════════════════════════════════════════════════════
-      # GPS + SIGNAL + DOLBY
-      # ═══════════════════════════════════════════════════════════════════════
-      - name: Patch GPS, Signal, Dolby
+      - name: Patch GPS Signal Dolby
         run: |
           cd kernel
-          # GPS UART timeout
-          for f in drivers/tty/serial/msm_geni_serial.c \
-                   drivers/tty/serial/qcom_geni_serial.c \
-                   drivers/gnss/gnss_serial.c; do
-            [ -f "$f" ] || continue
-            sed -i 's/msecs_to_jiffies([0-9]\+)/msecs_to_jiffies(500)/g' "$f" || true
+          for f in drivers/tty/serial/msm_geni_serial.c drivers/tty/serial/qcom_geni_serial.c; do
+            [ -f "$f" ] && sed -i "s/msecs_to_jiffies([0-9]\+)/msecs_to_jiffies(500)/g" "$f" || true
           done
-          # Signal boost
-          for f in drivers/net/wireless/ath/ath11k/mac.c \
-                   drivers/net/wireless/ath/ath10k/mac.c; do
-            [ -f "$f" ] || continue
-            sed -i 's/ATH_MAX_POWER_LEVEL [0-9]*/ATH_MAX_POWER_LEVEL 60/g' "$f" || true
+          for f in sound/soc/qcom/qdsp6/q6asm.c sound/soc/qcom/qdsp6/q6afe.c; do
+            [ -f "$f" ] && sed -i "s/TIMEOUT_MS [0-9]*/TIMEOUT_MS 5000/g" "$f" || true
           done
-          # Dolby audio buffer
-          for f in sound/soc/qcom/qdsp6/q6asm.c \
-                   sound/soc/qcom/qdsp6/q6afe.c \
-                   sound/core/pcm_lib.c; do
-            [ -f "$f" ] || continue
-            sed -i 's/TIMEOUT_MS [0-9]*/TIMEOUT_MS 5000/g' "$f" || true
+          for f in drivers/net/wireless/ath/ath11k/mac.c drivers/net/wireless/ath/ath10k/mac.c; do
+            [ -f "$f" ] && sed -i "s/ATH_MAX_POWER_LEVEL [0-9]*/ATH_MAX_POWER_LEVEL 60/g" "$f" || true
           done
           git add -A && git commit -m "gps-signal-dolby" || true
 
-      # ═══════════════════════════════════════════════════════════════════════
-      # DEFCONFIG FULL POWER
-      # ═══════════════════════════════════════════════════════════════════════
-      - name: Konfigurasi Defconfig Full Power
+      - name: Konfigurasi Defconfig
         run: |
           cd kernel
-          if [ -f "arch/arm64/configs/marble_defconfig" ]; then
-            DEFCONFIG_NAME="marble_defconfig"
-            DEFCONFIG_FILE="arch/arm64/configs/marble_defconfig"
+          if   [ -f "arch/arm64/configs/marble_defconfig" ]; then
+            DC="marble_defconfig"; DF="arch/arm64/configs/marble_defconfig"
           elif [ -f "arch/arm64/configs/vendor/marble_defconfig" ]; then
-            DEFCONFIG_NAME="vendor/marble_defconfig"
-            DEFCONFIG_FILE="arch/arm64/configs/vendor/marble_defconfig"
+            DC="vendor/marble_defconfig"; DF="arch/arm64/configs/vendor/marble_defconfig"
           else
-            DEFCONFIG_NAME="gki_defconfig"
-            DEFCONFIG_FILE="arch/arm64/configs/gki_defconfig"
+            DC="gki_defconfig"; DF="arch/arm64/configs/gki_defconfig"
           fi
-          echo "TARGET_DEFCONFIG=$DEFCONFIG_NAME" >> $GITHUB_ENV
-
-          python3 - \
-            "$DEFCONFIG_FILE" \
+          echo "TARGET_DEFCONFIG=$DC" >> $GITHUB_ENV
+          python3 /tmp/gen_defconfig.py "$DF" \
             "${{ env.SUSFS_APPLIED }}" \
             "${{ github.event.inputs.security_level }}" \
             "${{ github.event.inputs.tcp_profile }}" \
@@ -1176,750 +615,143 @@ KEOF
             "${{ github.event.inputs.enable_full_security }}" \
             "${{ github.event.inputs.enable_integrity_bypass }}" \
             "${{ github.event.inputs.enable_dolby }}" \
-            "${{ github.event.inputs.enable_gps_fix }}" \
-            << 'PYEOF'
-import sys
-defconfig       = sys.argv[1]
-susfs_applied   = sys.argv[2]
-security_level  = sys.argv[3]
-tcp_profile     = sys.argv[4]
-cpu_governor    = sys.argv[5]
-enable_lto      = sys.argv[6]
-full_security   = sys.argv[7]
-bypass          = sys.argv[8]
-dolby           = sys.argv[9]
-gps             = sys.argv[10]
-
-configs = []
-
-# ── KSU ──────────────────────────────────────────────────────────────────
-configs += [
-    "CONFIG_WERROR=n",
-    "CONFIG_KSU=y",
-    "CONFIG_KPROBES=y",
-    "CONFIG_HAVE_KPROBES=y",
-    "CONFIG_KPROBE_EVENTS=y",
-]
-
-# ── TCP ──────────────────────────────────────────────────────────────────
-configs += [
-    "CONFIG_TCP_CONG_ADVANCED=y",
-    "CONFIG_TCP_CONG_BBR=y",
-    "CONFIG_TCP_CONG_CUBIC=y",
-    "CONFIG_TCP_CONG_HTCP=y",
-    "CONFIG_TCP_CONG_VEGAS=y",
-    "CONFIG_TCP_CONG_RENO=y",
-    'CONFIG_DEFAULT_TCP_CONG="bbr"',
-    "CONFIG_NET_SCH_FQ=y",
-    "CONFIG_NET_SCH_FQ_CODEL=y",
-    "CONFIG_NET_SCH_CAKE=y",
-    "CONFIG_NET_SCH_HTB=y",
-    "CONFIG_NET_SCH_PRIO=y",
-    "CONFIG_SYN_COOKIES=y",
-    "CONFIG_TCP_MD5SIG=y",
-]
-if tcp_profile == "bbr2_tuned":
-    configs.append("CONFIG_TCP_CONG_BBR2=m")
-
-# ── CPU GOVERNORS ─────────────────────────────────────────────────────────
-gov_map = {
-    "schedutil":    "CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y",
-    "performance":  "CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y",
-    "conservative": "CONFIG_CPU_FREQ_DEFAULT_GOV_CONSERVATIVE=y",
-    "pixel":        "CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y",
-}
-configs += [
-    "CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y",
-    "CONFIG_CPU_FREQ_GOV_PERFORMANCE=y",
-    "CONFIG_CPU_FREQ_GOV_POWERSAVE=y",
-    "CONFIG_CPU_FREQ_GOV_CONSERVATIVE=y",
-    "CONFIG_CPU_FREQ_GOV_USERSPACE=y",
-    "CONFIG_CPU_FREQ_GOV_SIMPLEONDEMAND=m",
-    "CONFIG_CPU_FREQ_STAT=y",
-    gov_map.get(cpu_governor, "CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y"),
-]
-
-# ── SCHEDULER ─────────────────────────────────────────────────────────────
-configs += [
-    "CONFIG_CFS_BANDWIDTH=y",
-    "CONFIG_RT_GROUP_SCHED=y",
-    "CONFIG_SCHED_AUTOGROUP=y",
-    "CONFIG_HZ_300=y",
-    "CONFIG_PREEMPT=y",
-    "CONFIG_PREEMPT_COUNT=y",
-    "CONFIG_IRQ_FORCED_THREADING=y",
-]
-
-# ── MEMORY ────────────────────────────────────────────────────────────────
-configs += [
-    "CONFIG_ZSMALLOC=y",
-    "CONFIG_ZRAM=y",
-    "CONFIG_ZRAM_DEF_COMP_LZ4=y",
-    "CONFIG_LZ4_COMPRESS=y",
-    "CONFIG_TRANSPARENT_HUGEPAGE=y",
-    "CONFIG_TRANSPARENT_HUGEPAGE_MADVISE=y",
-    "CONFIG_MEMORY_FAILURE=y",
-    "CONFIG_ZSWAP=y",
-    "CONFIG_ZBUD=y",
-    "CONFIG_Z3FOLD=y",
-    "CONFIG_BALLOON_COMPACTION=y",
-    "CONFIG_COMPACTION=y",
-    "CONFIG_MIGRATION=y",
-    "CONFIG_KSM=y",
-]
-
-# ── I/O ───────────────────────────────────────────────────────────────────
-configs += [
-    "CONFIG_MQ_IOSCHED_DEADLINE=y",
-    "CONFIG_MQ_IOSCHED_KYBER=y",
-    "CONFIG_IOSCHED_BFQ=y",
-    "CONFIG_BFQ_GROUP_IOSCHED=y",
-]
-
-# ── LTO ───────────────────────────────────────────────────────────────────
-if enable_lto == "true":
-    configs += [
-        "CONFIG_LTO=y",
-        "CONFIG_LTO_CLANG=y",
-        "CONFIG_THINLTO=y",
-        "CONFIG_LTO_CLANG_THIN=y",
-        "# CONFIG_LTO_CLANG_FULL is not set",
-    ]
-else:
-    configs += ["# CONFIG_LTO_CLANG is not set"]
-
-# ── FULL SECURITY TIER 1-8 ────────────────────────────────────────────────
-if full_security == "true":
-    configs += [
-        # === TIER 1: MEMORY HARDENING ===
-        "CONFIG_INIT_ON_ALLOC_DEFAULT_ON=y",
-        "CONFIG_INIT_ON_FREE_DEFAULT_ON=y",
-        "CONFIG_SLAB_FREELIST_RANDOM=y",
-        "CONFIG_SLAB_FREELIST_HARDENED=y",
-        "CONFIG_SHUFFLE_PAGE_ALLOCATOR=y",
-        "CONFIG_FORTIFY_SOURCE=y",
-        "CONFIG_HARDENED_USERCOPY=y",
-        "CONFIG_HARDENED_USERCOPY_FALLBACK=n",
-        "CONFIG_KASAN=n",         # off di production, on kalau debug
-        "CONFIG_KFENCE=y",        # low overhead, production safe
-        "CONFIG_UBSAN=n",         # off production
-        "CONFIG_VMAP_STACK=y",
-        "CONFIG_THREAD_INFO_IN_TASK=y",
-        "CONFIG_REFCOUNT_FULL=y",
-        "CONFIG_NULL_POINTER_PROTECTION=y",
-        "CONFIG_PAGE_POISONING=y",
-        "CONFIG_PAGE_POISONING_NO_SANITY=n",
-        "CONFIG_PAGE_POISONING_ZERO=n",
-
-        # === TIER 2: KERNEL HARDENING ===
-        "CONFIG_STACKPROTECTOR=y",
-        "CONFIG_STACKPROTECTOR_STRONG=y",
-        "CONFIG_STRICT_KERNEL_RWX=y",
-        "CONFIG_STRICT_MODULE_RWX=y",
-        "CONFIG_DEBUG_WX=y",
-        "CONFIG_RANDOMIZE_BASE=y",         # KASLR
-        "CONFIG_RANDOMIZE_MODULE_REGION_FULL=y",
-        "CONFIG_LATENT_ENTROPY=y",
-        "CONFIG_GCC_PLUGIN_LATENT_ENTROPY=y",
-        "CONFIG_GCC_PLUGIN_STRUCTLEAK=y",
-        "CONFIG_GCC_PLUGIN_STRUCTLEAK_BYREF_ALL=y",
-        "CONFIG_GCC_PLUGIN_STACKLEAK=y",
-        "CONFIG_GCC_PLUGIN_RANDSTRUCT=y",
-        "CONFIG_RANDSTRUCT_PERFORMANCE=y",
-        "CONFIG_STRUCTLEAK_BIG=y",
-
-        # === TIER 3: ARM64 HARDWARE ===
-        "CONFIG_ARM64_PTR_AUTH=y",
-        "CONFIG_ARM64_PTR_AUTH_KERNEL=y",
-        "CONFIG_ARM64_BTI=y",
-        "CONFIG_ARM64_BTI_KERNEL=y",
-        "CONFIG_ARM64_MTE=y",
-        "CONFIG_SHADOW_CALL_STACK=y",
-        "CONFIG_ARM64_SW_TTBR0_PAN=y",
-        "CONFIG_ARM64_PAN=y",
-        "CONFIG_ARM64_UAO=y",
-        "CONFIG_ARM64_EPAN=y",
-        "CONFIG_UNMAP_KERNEL_AT_EL0=y",   # KPTI
-        "CONFIG_MITIGATE_SPECTRE_BRANCH_HISTORY=y",
-        "CONFIG_ARM64_ERRATUM_1463225=y",
-        "CONFIG_ARM64_ERRATUM_1542419=y",
-        "CONFIG_HARDEN_EL2_VECTORS=y",
-        "CONFIG_HARDEN_BRANCH_PREDICTOR=y",
-
-        # CFI
-        "CONFIG_CFI_CLANG=y",
-        "CONFIG_CFI_PERMISSIVE=n",
-
-        # === TIER 4: NETWORK SECURITY ===
-        "CONFIG_SECURITY_NETWORK=y",
-        "CONFIG_SECURITY_NETWORK_XFRM=y",
-        "CONFIG_NETFILTER=y",
-        "CONFIG_NF_CONNTRACK=y",
-        "CONFIG_NF_CONNTRACK_SECMARK=y",
-        "CONFIG_NF_CONNTRACK_EVENTS=y",
-        "CONFIG_NETFILTER_ADVANCED=y",
-        "CONFIG_NF_TABLES=y",
-        "CONFIG_NF_TABLES_INET=y",
-        "CONFIG_NFT_CT=y",
-        "CONFIG_NFT_LIMIT=y",
-        "CONFIG_NFT_LOG=y",
-        "CONFIG_NFT_REJECT=y",
-        "CONFIG_IP_SET=y",
-        "CONFIG_IP_NF_IPTABLES=y",
-        "CONFIG_IP_NF_FILTER=y",
-        "CONFIG_IP_NF_MANGLE=y",
-        "CONFIG_IP_NF_TARGET_REJECT=y",
-        "CONFIG_IP6_NF_IPTABLES=y",
-        "CONFIG_IP6_NF_FILTER=y",
-        "CONFIG_XFRM=y",
-        "CONFIG_XFRM_USER=y",
-        "CONFIG_XFRM_SUB_POLICY=y",
-        "CONFIG_XFRM_STATISTICS=y",
-        "CONFIG_INET_ESP=y",
-        "CONFIG_INET_AH=y",
-        "CONFIG_WIREGUARD=y",
-        "CONFIG_TCP_CONG_ADVANCED=y",
-        "CONFIG_SYN_COOKIES=y",
-
-        # === TIER 5: eBPF SECURITY ===
-        "CONFIG_BPF=y",
-        "CONFIG_BPF_SYSCALL=y",
-        "CONFIG_BPF_JIT=y",
-        "CONFIG_BPF_JIT_ALWAYS_ON=y",
-        "CONFIG_BPF_JIT_DEFAULT_ON=y",
-        "CONFIG_HAVE_EBPF_JIT=y",
-        "CONFIG_BPF_EVENTS=y",
-        "CONFIG_BPF_LSM=y",
-        "CONFIG_SECURITY_BPFLSM=y",
-        "CONFIG_BPF_STREAM_PARSER=y",
-        "CONFIG_SECCOMP=y",
-        "CONFIG_SECCOMP_FILTER=y",
-
-        # === TIER 6: CRYPTO ===
-        "CONFIG_CRYPTO_AES=y",
-        "CONFIG_CRYPTO_AES_ARM64=y",
-        "CONFIG_CRYPTO_AES_ARM64_CE=y",
-        "CONFIG_CRYPTO_AES_ARM64_CE_CCM=y",
-        "CONFIG_CRYPTO_AES_ARM64_CE_BLK=y",
-        "CONFIG_CRYPTO_AES_ARM64_NEON_BLK=y",
-        "CONFIG_CRYPTO_CHACHA20POLY1305=y",
-        "CONFIG_CRYPTO_CHACHA20_NEON=y",
-        "CONFIG_CRYPTO_POLY1305_NEON=y",
-        "CONFIG_CRYPTO_SHA256_ARM64=y",
-        "CONFIG_CRYPTO_SHA3_ARM64=y",
-        "CONFIG_CRYPTO_SHA512_ARM64=y",
-        "CONFIG_CRYPTO_BLAKE2S=y",
-        "CONFIG_CRYPTO_BLAKE2B=y",
-        "CONFIG_CRYPTO_GCM=y",
-        "CONFIG_CRYPTO_GHASH_ARM64_CE=y",
-        "CONFIG_CRYPTO_CRC32_ARM64=y",
-        "CONFIG_CRYPTO_CRCT10DIF_ARM64_CE=y",
-        "CONFIG_CRYPTO_RNG2=y",
-        "CONFIG_CRYPTO_DRBG=y",
-        "CONFIG_CRYPTO_DRBG_HMAC=y",
-        "CONFIG_CRYPTO_DRBG_HASH=y",
-        "CONFIG_CRYPTO_DRBG_CTR=y",
-        "CONFIG_CRYPTO_JITTERENTROPY=y",
-        "CONFIG_HW_RANDOM=y",
-        "CONFIG_HW_RANDOM_QCOM=y",
-        "CONFIG_CRYPTO_USER=y",
-        "CONFIG_CRYPTO_USER_API_HASH=y",
-        "CONFIG_CRYPTO_USER_API_SKCIPHER=y",
-        "CONFIG_CRYPTO_USER_API_RNG=y",
-        "CONFIG_CRYPTO_USER_API_AEAD=y",
-        "# CONFIG_CRYPTO_MD5 is not set",   # disable MD5
-        "# CONFIG_CRYPTO_DES is not set",   # disable DES
-        "# CONFIG_CRYPTO_RC4 is not set",   # disable RC4
-
-        # === TIER 7: AUDIT & INTEGRITY ===
-        "CONFIG_AUDIT=y",
-        "CONFIG_AUDITSYSCALL=y",
-        "CONFIG_AUDIT_WATCH=y",
-        "CONFIG_AUDIT_TREE=y",
-        "CONFIG_INTEGRITY=y",
-        "CONFIG_INTEGRITY_SIGNATURE=y",
-        "CONFIG_INTEGRITY_ASYMMETRIC_KEYS=y",
-        "CONFIG_IMA=y",
-        "CONFIG_IMA_MEASURE_PCR_IDX=10",
-        "CONFIG_IMA_READ_POLICY=y",
-        "CONFIG_IMA_APPRAISE=y",
-        "CONFIG_IMA_APPRAISE_BOOTPARAM=y",
-        "CONFIG_EVM=y",
-        "CONFIG_EVM_ATTR_FSUUID=y",
-
-        # === TIER 8: PROCESS & NAMESPACE ===
-        "CONFIG_SECURITY_YAMA=y",
-        "CONFIG_DEFAULT_SECURITY_YAMA=n",  # SELinux still primary
-        "CONFIG_NAMESPACES=y",
-        "CONFIG_UTS_NS=y",
-        "CONFIG_IPC_NS=y",
-        "CONFIG_USER_NS=y",
-        "CONFIG_PID_NS=y",
-        "CONFIG_NET_NS=y",
-        "CONFIG_CGROUPS=y",
-        "CONFIG_CGROUP_FREEZER=y",
-        "CONFIG_CGROUP_DEVICE=y",
-        "CONFIG_CGROUP_CPUACCT=y",
-        "CONFIG_CGROUP_BPF=y",
-        "CONFIG_MEMCG=y",
-        "CONFIG_BLK_CGROUP=y",
-        "CONFIG_CPUSETS=y",
-        "CONFIG_TASKSTATS=y",
-        "CONFIG_TASK_DELAY_ACCT=y",
-        "CONFIG_TASK_XACCT=y",
-        "CONFIG_TASK_IO_ACCOUNTING=y",
-
-        # === SIDE CHANNEL MITIGATIONS ===
-        "CONFIG_HARDEN_BRANCH_HISTORY=y",
-        "CONFIG_CPU_SPECTRE=y",
-        "CONFIG_SPECULATION_BARRIER=y",
-
-        # === COVERT CHANNEL ===
-        "CONFIG_SCHED_STACK_END_CHECK=y",
-        "CONFIG_PROFILING=n",              # reduce timing leaks
-
-        # === ANDROID SECURITY ===
-        "CONFIG_ANDROID_PARANOID_NETWORK=y",
-        "CONFIG_ANDROID_BINDERFS=y",
-        "CONFIG_ANDROID_BINDER_IPC=y",
-        "CONFIG_ANDROID_BINDER_IPC_SELFTEST=n",
-        "CONFIG_TRUSTED_KEYS=y",
-        "CONFIG_ENCRYPTED_KEYS=y",
-        "CONFIG_KEY_DH_OPERATIONS=y",
-        "CONFIG_ASYMMETRIC_KEY_TYPE=y",
-        "CONFIG_ASYMMETRIC_PUBLIC_KEY_SUBTYPE=y",
-        "CONFIG_X509_CERTIFICATE_PARSER=y",
-        "CONFIG_PKCS7_MESSAGE_PARSER=y",
-        "CONFIG_PKCS8_PRIVATE_KEY_PARSER=y",
-
-        # === QUALCOMM SECURITY ===
-        "CONFIG_QCOM_SCM=y",
-        "CONFIG_QCOM_RMTFS_MEM=y",
-        "CONFIG_QCOM_QMI_HELPERS=y",
-
-        # === FILESYSTEM SECURITY ===
-        "CONFIG_FS_ENCRYPTION=y",
-        "CONFIG_FS_ENCRYPTION_ALGS=y",
-        "CONFIG_FS_VERITY=y",
-        "CONFIG_DM_CRYPT=y",
-        "CONFIG_DM_INTEGRITY=y",
-        "CONFIG_DM_VERITY=y",
-        "# CONFIG_DM_VERITY_VERIFY_ROOTHASH_SIG is not set",
-        "CONFIG_ECRYPT_FS=n",
-    ]
-
-# ── BASE SECURITY (selalu ada) ────────────────────────────────────────────
-configs += [
-    "CONFIG_SECURITY=y",
-    "CONFIG_SECURITY_DMESG_RESTRICT=y",
-    "CONFIG_SECURITY_SELINUX=y",
-    "CONFIG_SECURITY_SELINUX_DEVELOP=y",
-    "CONFIG_SECURITY_SELINUX_BOOTPARAM=y",
-    "CONFIG_SECURITY_SELINUX_BOOTPARAM_VALUE=1",
-    "CONFIG_SECURITY_SELINUX_DISABLE=y",
-    "CONFIG_DEFAULT_SECURITY_SELINUX=y",
-]
-
-# ── INTEGRITY BYPASS ──────────────────────────────────────────────────────
-if bypass == "true":
-    configs += [
-        "# CONFIG_SECURITY_LOCKDOWN_LSM is not set",
-        "CONFIG_DEVMEM=y",
-        "# CONFIG_STRICT_DEVMEM is not set",
-        "# CONFIG_MODULE_SIG is not set",
-        "# CONFIG_MODULE_SIG_FORCE is not set",
-    ]
-
-# ── GPS ───────────────────────────────────────────────────────────────────
-if gps == "true":
-    configs += [
-        "CONFIG_GNSS=y",
-        "CONFIG_GNSS_SERIAL=y",
-        "CONFIG_GNSS_UBX_SERIAL=y",
-        "CONFIG_QCOM_GENI_SE=y",
-    ]
-
-# ── DOLBY AUDIO ───────────────────────────────────────────────────────────
-if dolby == "true":
-    configs += [
-        "CONFIG_SND_SOC_COMPRESS=y",
-        "CONFIG_SND_COMPRESS_OFFLOAD=y",
-        "CONFIG_SND_SOC_WCD938X=y",
-        "CONFIG_SND_SOC_WCD938X_SDW=y",
-        "CONFIG_SND_SOC_LPASS_VA_MACRO=y",
-        "CONFIG_SND_SOC_LPASS_WSA_MACRO=y",
-        "CONFIG_SND_SOC_LPASS_RX_MACRO=y",
-        "CONFIG_SND_SOC_LPASS_TX_MACRO=y",
-        "CONFIG_SND_PCM_OSS=y",
-    ]
-
-# ── SuSFS ─────────────────────────────────────────────────────────────────
-susfs_configs = [
-    "CONFIG_KSU_SUSFS=y",
-    "CONFIG_KSU_SUSFS_SUS_PATH=y",
-    "CONFIG_KSU_SUSFS_SUS_MOUNT=y",
-    "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y",
-    "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y",
-    "CONFIG_KSU_SUSFS_SUS_KSTAT=y",
-    "CONFIG_KSU_SUSFS_TRY_UMOUNT=y",
-    "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y",
-    "CONFIG_KSU_SUSFS_SPOOF_UNAME=y",
-    "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y",
-    "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y",
-    "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y",
-    "CONFIG_KSU_SUSFS_SUS_SU=n",
-]
-
-with open(defconfig, "a", encoding="utf-8") as f:
-    f.write("\n# === MARBLE FULL POWER CONFIGS ===\n")
-    for c in configs:
-        f.write(c + "\n")
-    if susfs_applied == "true":
-        f.write("\n# === SuSFS ===\n")
-        for c in susfs_configs:
-            f.write(c + "\n")
-        f.write("CONFIG_KSU_SUSFS_ENABLE_LOG=n\n" \
-            if security_level == "maximum_stealth" \
-            else "CONFIG_KSU_SUSFS_ENABLE_LOG=y\n")
-    else:
-        f.write("CONFIG_KSU_SUSFS=n\n")
-
-print(f">>> Defconfig: {len(configs)} configs written")
-PYEOF
-
+            "${{ github.event.inputs.enable_gps_fix }}"
           git add -A && git commit -m "defconfig-full-power" || true
 
-      # ═══════════════════════════════════════════════════════════════════════
-      # KOMPILASI
-      # ═══════════════════════════════════════════════════════════════════════
-      - name: Kompilasi Kernel Full Power
+      - name: Kompilasi Kernel
         run: |
           cd kernel
           export KBUILD_BUILD_USER="marble-fullpower"
           export KBUILD_BUILD_HOST="kanha-builder"
           export CCACHE_DIR="$HOME/.ccache"
-          export CCACHE_MAXSIZE="8G"
           export USE_CCACHE=1
           ccache -M 8G
-
-          EXTRA_CFLAGS="-Wno-error -Wno-implicit-function-declaration"
-          EXTRA_CFLAGS="$EXTRA_CFLAGS -Wno-unused-function -Wno-strict-prototypes"
-          EXTRA_CFLAGS="$EXTRA_CFLAGS -Wno-out-of-line-declaration"
-          EXTRA_CFLAGS="$EXTRA_CFLAGS -Wno-incompatible-pointer-types"
-          EXTRA_CFLAGS="$EXTRA_CFLAGS -O3 -pipe"
-          EXTRA_CFLAGS="$EXTRA_CFLAGS -mcpu=cortex-a710 -mtune=cortex-a710"
-          EXTRA_CFLAGS="$EXTRA_CFLAGS -fstack-protector-strong"
-          EXTRA_CFLAGS="$EXTRA_CFLAGS -D_FORTIFY_SOURCE=2"
-
-          if [ "${{ github.event.inputs.enable_lto }}" = "true" ]; then
-            EXTRA_CFLAGS="$EXTRA_CFLAGS -flto=thin"
-            EXTRA_LDFLAGS="-fuse-ld=lld -flto=thin"
-          else
-            EXTRA_LDFLAGS="-fuse-ld=lld"
-          fi
-
-          make O=out ARCH=arm64 CC="ccache clang" LLVM=1 LLVM_IAS=1 \
-            "${{ env.TARGET_DEFCONFIG }}"
-
-          if [ -f "arch/arm64/configs/vendor/marble_GKI.config" ] && \
-             [ "${{ env.TARGET_DEFCONFIG }}" = "gki_defconfig" ]; then
+          CFLAGS="-Wno-error -Wno-implicit-function-declaration -Wno-unused-function"
+          CFLAGS="$CFLAGS -Wno-strict-prototypes -Wno-out-of-line-declaration"
+          CFLAGS="$CFLAGS -Wno-incompatible-pointer-types -O3 -pipe"
+          CFLAGS="$CFLAGS -mcpu=cortex-a710 -mtune=cortex-a710 -fstack-protector-strong"
+          LDFLAGS="-fuse-ld=lld"
+          [ "${{ github.event.inputs.enable_lto }}" = "true" ] && {
+            CFLAGS="$CFLAGS -flto=thin"; LDFLAGS="$LDFLAGS -flto=thin"
+          }
+          make O=out ARCH=arm64 CC="ccache clang" LLVM=1 LLVM_IAS=1 "${{ env.TARGET_DEFCONFIG }}"
+          [ -f "arch/arm64/configs/vendor/marble_GKI.config" ] && \
+            [ "${{ env.TARGET_DEFCONFIG }}" = "gki_defconfig" ] && \
             ./scripts/kconfig/merge_config.sh -m -O out out/.config \
-              arch/arm64/configs/vendor/marble_GKI.config
-          fi
-
+              arch/arm64/configs/vendor/marble_GKI.config || true
           ./scripts/config --file out/.config \
             -d WERROR -d CONFIG_WERROR -d KSU_SUSFS_SUS_SU \
             -d LOCALVERSION_AUTO --set-val FRAME_WARN 4096
-
           make O=out ARCH=arm64 CC="ccache clang" LLVM=1 LLVM_IAS=1 olddefconfig
-
           set +e
-          make -j$(nproc --all) \
-            O=out ARCH=arm64 \
+          make -j$(nproc --all) O=out ARCH=arm64 \
             CC="ccache clang" LLVM=1 LLVM_IAS=1 \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
-            KCFLAGS="$EXTRA_CFLAGS" \
-            LDFLAGS="$EXTRA_LDFLAGS" \
-            Image Image.gz modules 2>&1 | tee build_full.log
-          BUILD_STATUS=${PIPESTATUS[0]}
-          set -e
+            KCFLAGS="$CFLAGS" LDFLAGS="$LDFLAGS" \
+            Image Image.gz modules 2>&1 | tee build.log
+          S=${PIPESTATUS[0]}; set -e
+          [ $S -ne 0 ] && { grep -E "error:|fatal error:" build.log | tail -50; exit $S; }
+          ccache -s; echo ">>> BUILD OK"
 
-          if [ $BUILD_STATUS -ne 0 ]; then
-            echo ">>> BUILD GAGAL:"
-            grep -E "error:|fatal error:|undefined reference|FAILED" \
-              build_full.log | tail -100 || true
-            exit $BUILD_STATUS
-          fi
-          ccache -s
-          echo ">>> Build BERHASIL - FULL POWER"
-
-      # ═══════════════════════════════════════════════════════════════════════
-      # PACKAGE ANYKERNEL3
-      # ═══════════════════════════════════════════════════════════════════════
-      - name: Paketkan ke AnyKernel3 Full Power
+      - name: Package AnyKernel3
         run: |
           git clone --depth=1 "${{ env.AK3_REPO }}" AnyKernel3
           cd AnyKernel3
           rm -rf .git README.md modules patch ramdisk
+          cat > anykernel.sh << 'AKEOF'
+          # AnyKernel3 - Marble Full Power
+          properties() { '
+          kernel.string=Marble FullPower BakaSU - kanha
+          do.devicecheck=0
+          do.modules=1
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=marble
+          device.name2=marblein
+          '; }
+          BLOCK=boot; IS_SLOT_DEVICE=1; RAMDISK_COMPRESSION=auto; PATCH_VBMETA_FLAG=auto;
+          block=boot; is_slot_device=1; ramdisk_compression=auto; patch_vbmeta_flag=auto;
+          . tools/ak3-core.sh; split_boot; flash_boot;
+          AKEOF
 
-          cat > anykernel.sh << 'EOF'
-# AnyKernel3 - Marble Full Power Kernel
-properties() { '
-kernel.string=Marble Full Power Kernel - BakaSU - kanha
-do.devicecheck=0
-do.modules=1
-do.systemless=1
-do.cleanup=1
-do.cleanuponabort=0
-device.name1=marble
-device.name2=marblein
-supported.versions=
-supported.patchlevels=
-supported.vendorpatchlevels=
-'; }
-BLOCK=boot;
-IS_SLOT_DEVICE=1;
-RAMDISK_COMPRESSION=auto;
-PATCH_VBMETA_FLAG=auto;
-block=boot;
-is_slot_device=1;
-ramdisk_compression=auto;
-patch_vbmeta_flag=auto;
-. tools/ak3-core.sh;
-split_boot;
-flash_boot;
-EOF
+          cat > marble_tune.sh << 'TUNEEOF'
+          #!/system/bin/sh
+          while [ "$(getprop sys.boot_completed)" != "1" ]; do sleep 2; done
+          sleep 3
+          resetprop -n ro.boot.verifiedbootstate green
+          resetprop -n ro.boot.vbmeta.device_state locked
+          resetprop -n ro.boot.flash.locked 1
+          resetprop -n ro.boot.warranty_bit 0
+          resetprop -n ro.warranty_bit 0
+          resetprop -n ro.debuggable 0
+          resetprop -n ro.secure 1
+          resetprop -n ro.build.type user
+          resetprop -n ro.build.tags release-keys
+          resetprop -n vendor.boot.verifiedbootstate green
+          echo 1 > /proc/sys/kernel/kptr_restrict
+          echo 1 > /proc/sys/kernel/dmesg_restrict
+          echo 2 > /proc/sys/kernel/randomize_va_space
+          echo 1 > /proc/sys/fs/protected_hardlinks
+          echo 1 > /proc/sys/fs/protected_symlinks
+          echo 0 > /proc/sys/kernel/sysrq
+          echo 1 > /proc/sys/net/ipv4/tcp_syncookies
+          echo 0 > /proc/sys/net/ipv4/tcp_timestamps
+          echo 1 > /proc/sys/net/ipv4/conf/all/rp_filter
+          echo 0 > /proc/sys/net/ipv4/conf/all/accept_redirects
+          echo 0 > /proc/sys/net/ipv4/conf/all/send_redirects
+          echo 1 > /proc/sys/net/ipv4/icmp_echo_ignore_broadcasts
+          echo bbr > /proc/sys/net/ipv4/tcp_congestion_control
+          echo fq > /proc/sys/net/core/default_qdisc
+          echo 0 > /proc/sys/net/ipv4/tcp_slow_start_after_idle
+          echo 1 > /proc/sys/net/ipv4/tcp_fastopen
+          echo 2 > /proc/sys/net/core/bpf_jit_harden
+          echo 4194304 > /proc/sys/net/core/rmem_max
+          echo 4194304 > /proc/sys/net/core/wmem_max
+          resetprop -n persist.vendor.radio.add_power_save 0
+          resetprop -n persist.vendor.radio.apm_sim_not_pwdn 1
+          resetprop -n persist.vendor.radio.sib16_support 1
+          resetprop -n persist.gps.qc_nlp_in_use 1
+          resetprop -n ro.gps.agps_provider 1
+          resetprop -n audio.deep_buffer.media true
+          resetprop -n audio.offload.gapless.enabled true
+          resetprop -n persist.audio.fluence.speaker true
+          resetprop -n persist.vendor.audio.fluence.for.speaker true
+          for p in /sys/devices/system/cpu/cpufreq/policy*; do
+            echo schedutil > "$p/scaling_governor" 2>/dev/null || true
+            echo 500  > "$p/schedutil/up_rate_limit_us" 2>/dev/null || true
+            echo 2000 > "$p/schedutil/down_rate_limit_us" 2>/dev/null || true
+          done
+          echo 100 > /proc/sys/vm/swappiness
+          echo 10  > /proc/sys/vm/dirty_ratio
+          echo 5   > /proc/sys/vm/dirty_background_ratio
+          for q in /sys/block/*/queue; do
+            [ -d "$q" ] || continue
+            echo mq-deadline > "$q/scheduler" 2>/dev/null || true
+            echo 64 > "$q/read_ahead_kb" 2>/dev/null || true
+            echo 0  > "$q/add_random" 2>/dev/null || true
+          done
+          setenforce 0 2>/dev/null || true
+          log -t marble-fp "Post-boot tuning done - FULL POWER"
+          TUNEEOF
+          chmod 755 marble_tune.sh
 
-          # Post-boot script FULL POWER
-          cat > marble_fullpower_tune.sh << 'SCRIPTEOF'
-#!/system/bin/sh
-# Marble Full Power - Post Boot Script
-# Generated by kanha builder - ALL FEATURES
+          [ -f "../kernel/out/arch/arm64/boot/Image" ] && cp ../kernel/out/arch/arm64/boot/Image . \
+          || { [ -f "../kernel/out/arch/arm64/boot/Image.gz" ] && cp ../kernel/out/arch/arm64/boot/Image.gz .; } \
+          || { echo "ERROR: no kernel image"; exit 1; }
 
-while [ "$(getprop sys.boot_completed)" != "1" ]; do sleep 2; done
-sleep 3
+          mkdir -p modules/vendor/lib/modules
+          find ../kernel/out -name "*.ko" -exec cp {} modules/vendor/lib/modules/ \; 2>/dev/null || true
 
-# === INTEGRITY BYPASS ===
-resetprop -n ro.boot.vbmeta.device_state locked
-resetprop -n ro.boot.verifiedbootstate green
-resetprop -n ro.boot.flash.locked 1
-resetprop -n ro.boot.veritymode enforcing
-resetprop -n ro.boot.warranty_bit 0
-resetprop -n ro.warranty_bit 0
-resetprop -n ro.debuggable 0
-resetprop -n ro.secure 1
-resetprop -n vendor.boot.vbmeta.device_state locked
-resetprop -n vendor.boot.verifiedbootstate green
-resetprop -n ro.build.type user
-resetprop -n ro.build.tags release-keys
-resetprop -n ro.build.selinux 1
-
-# === KERNEL HARDENING (sysctl) ===
-# Memory protection
-echo 1 > /proc/sys/kernel/kptr_restrict
-echo 1 > /proc/sys/kernel/dmesg_restrict
-echo 3 > /proc/sys/kernel/perf_event_paranoid
-echo 1 > /proc/sys/kernel/unprivileged_bpf_disabled
-echo 2 > /proc/sys/kernel/randomize_va_space
-echo 2 > /proc/sys/kernel/yama/ptrace_scope
-echo 0 > /proc/sys/kernel/sysrq
-echo 1 > /proc/sys/kernel/modules_disabled 2>/dev/null || true
-echo 200 > /proc/sys/kernel/pid_max 2>/dev/null || true
-
-# Filesystem protection
-echo 1 > /proc/sys/fs/protected_hardlinks
-echo 1 > /proc/sys/fs/protected_symlinks
-echo 1 > /proc/sys/fs/protected_fifos 2>/dev/null || true
-echo 1 > /proc/sys/fs/protected_regular 2>/dev/null || true
-
-# Suid dump disable
-echo 0 > /proc/sys/fs/suid_dumpable
-
-# === NETWORK SECURITY FULL ===
-# IPv4 hardening
-echo 1 > /proc/sys/net/ipv4/tcp_syncookies
-echo 1 > /proc/sys/net/ipv4/tcp_rfc1337
-echo 0 > /proc/sys/net/ipv4/tcp_timestamps
-echo 1 > /proc/sys/net/ipv4/conf/all/rp_filter
-echo 1 > /proc/sys/net/ipv4/conf/default/rp_filter
-echo 0 > /proc/sys/net/ipv4/conf/all/accept_redirects
-echo 0 > /proc/sys/net/ipv4/conf/default/accept_redirects
-echo 0 > /proc/sys/net/ipv4/conf/all/send_redirects
-echo 0 > /proc/sys/net/ipv4/conf/default/send_redirects
-echo 0 > /proc/sys/net/ipv4/conf/all/accept_source_route
-echo 0 > /proc/sys/net/ipv4/conf/all/secure_redirects
-echo 1 > /proc/sys/net/ipv4/conf/all/log_martians
-echo 1 > /proc/sys/net/ipv4/icmp_echo_ignore_broadcasts
-echo 1 > /proc/sys/net/ipv4/icmp_ignore_bogus_error_responses
-echo 0 > /proc/sys/net/ipv4/ip_forward
-# IPv6 hardening
-echo 0 > /proc/sys/net/ipv6/conf/all/accept_redirects
-echo 0 > /proc/sys/net/ipv6/conf/all/accept_source_route
-echo 0 > /proc/sys/net/ipv6/conf/all/accept_ra
-echo 0 > /proc/sys/net/ipv6/conf/default/accept_ra
-
-# === TCP FULL OPTIMIZATION ===
-echo bbr > /proc/sys/net/ipv4/tcp_congestion_control
-echo fq > /proc/sys/net/core/default_qdisc
-echo 0 > /proc/sys/net/ipv4/tcp_slow_start_after_idle
-echo 1 > /proc/sys/net/ipv4/tcp_fastopen
-echo 1 > /proc/sys/net/ipv4/tcp_sack
-echo 1 > /proc/sys/net/ipv4/tcp_fack
-echo 1 > /proc/sys/net/ipv4/tcp_window_scaling
-echo 1 > /proc/sys/net/ipv4/tcp_moderate_rcvbuf
-echo 4194304 > /proc/sys/net/core/rmem_max
-echo 4194304 > /proc/sys/net/core/wmem_max
-echo 4194304 > /proc/sys/net/core/rmem_default
-echo 4194304 > /proc/sys/net/core/wmem_default
-echo 16384 65536 4194304 > /proc/sys/net/ipv4/tcp_rmem
-echo 16384 65536 4194304 > /proc/sys/net/ipv4/tcp_wmem
-echo 0 > /proc/sys/net/ipv4/tcp_ecn
-echo 5 > /proc/sys/net/ipv4/tcp_keepalive_probes
-echo 30 > /proc/sys/net/ipv4/tcp_keepalive_intvl
-echo 120 > /proc/sys/net/ipv4/tcp_keepalive_time
-
-# BPF JIT hardening
-echo 2 > /proc/sys/net/core/bpf_jit_harden
-
-# === SIGNAL & RADIO BOOST ===
-resetprop -n persist.vendor.radio.add_power_save 0
-resetprop -n persist.vendor.radio.apm_sim_not_pwdn 1
-resetprop -n persist.vendor.radio.sib16_support 1
-resetprop -n persist.vendor.radio.rat_on combo
-resetprop -n persist.radio.calls.on.ims true
-resetprop -n persist.vendor.radio.lte_to_1x_cc_idle 1
-resetprop -n persist.vendor.radio.force_on_dc true
-resetprop -n ril.subscription.types NV,RUIM
-resetprop -n DEVICE_PROVISIONED 1
-
-# === GPS OPTIMIZATION ===
-resetprop -n persist.gps.qc_nlp_in_use 1
-resetprop -n persist.loc.nlp_name com.qualcomm.location
-resetprop -n ro.gps.agps_provider 1
-resetprop -n persist.vendor.gps.hal.start.mode 2
-resetprop -n persist.gps.gpsonewayfix true
-resetprop -n persist.gps.xtra-daemon.disabled false
-
-# === CPU GOVERNOR ===
-GOV=schedutil
-for pol in /sys/devices/system/cpu/cpufreq/policy*; do
-  echo $GOV > "$pol/scaling_governor" 2>/dev/null || true
-done
-# Schedutil tuning
-for pol in /sys/devices/system/cpu/cpufreq/policy*; do
-  echo 500  > "$pol/schedutil/up_rate_limit_us" 2>/dev/null || true
-  echo 2000 > "$pol/schedutil/down_rate_limit_us" 2>/dev/null || true
-  echo 0    > "$pol/schedutil/iowait_boost_enable" 2>/dev/null || true
-done
-
-# === MEMORY OPTIMIZATION ===
-echo 100 > /proc/sys/vm/swappiness
-echo 10  > /proc/sys/vm/dirty_ratio
-echo 5   > /proc/sys/vm/dirty_background_ratio
-echo 500 > /proc/sys/vm/dirty_writeback_centisecs
-echo 3   > /proc/sys/vm/drop_caches 2>/dev/null || true
-echo 0   > /proc/sys/vm/oom_kill_allocating_task
-echo 0   > /proc/sys/vm/overcommit_memory
-echo 60  > /proc/sys/vm/overcommit_ratio
-echo 1   > /proc/sys/vm/compact_unevictable_allowed 2>/dev/null || true
-
-# === DOLBY ATMOS AUDIO ===
-resetprop -n audio.deep_buffer.media true
-resetprop -n audio.offload.buffer.size.kb 32
-resetprop -n audio.offload.gapless.enabled true
-resetprop -n audio.offload.multiple.enabled false
-resetprop -n audio.offload.min.duration.secs 30
-resetprop -n ro.config.media_vol_steps 25
-resetprop -n persist.audio.fluence.speaker true
-resetprop -n persist.audio.fluence.voicecall true
-resetprop -n persist.audio.fluence.voicerec true
-resetprop -n ro.vendor.audio.sdk.fluencetype fluence
-resetprop -n persist.vendor.audio.fluence.for.speaker true
-resetprop -n persist.vendor.audio.hw.binder.size.kbyte 1024
-
-# === I/O SCHEDULER ===
-for q in /sys/block/*/queue; do
-  [ -d "$q" ] || continue
-  echo mq-deadline > "$q/scheduler" 2>/dev/null || true
-  echo 64          > "$q/read_ahead_kb" 2>/dev/null || true
-  echo 0           > "$q/add_random" 2>/dev/null || true
-  echo 0           > "$q/rotational" 2>/dev/null || true
-  echo 2           > "$q/rq_affinity" 2>/dev/null || true
-  echo 256         > "$q/nr_requests" 2>/dev/null || true
-done
-
-# === THERMAL OPTIMIZATION ===
-resetprop -n sys.config.thermal.version 3 2>/dev/null || true
-
-# === SELINUX PERMISSIVE (post-bypass) ===
-setenforce 0 2>/dev/null || true
-
-log -t marble-fullpower "Post-boot tuning complete - ALL FEATURES ACTIVE"
-SCRIPTEOF
-          chmod 755 marble_fullpower_tune.sh
-
-          # Build info
-          BUILD_DATE=$(date +"%Y%m%d-%H%M")
-          cat > BUILD_INFO.txt << INFOEOF
-============================================
-MARBLE FULL POWER KERNEL
-============================================
-Date:          $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-Device:        Poco F5 (marble) - SM7475
-Branch:        ${{ github.event.inputs.kernel_branch }}
-KSU:           BakaSU ${{ github.event.inputs.ksu_version_override }}
-SuSFS:         ${{ github.event.inputs.enable_susfs }}
-Security:      ${{ github.event.inputs.security_level }}
-TCP:           ${{ github.event.inputs.tcp_profile }}
-CPU Governor:  ${{ github.event.inputs.cpu_governor }}
-Dolby:         ${{ github.event.inputs.enable_dolby }}
-GPS Fix:       ${{ github.event.inputs.enable_gps_fix }}
-Signal Boost:  ${{ github.event.inputs.enable_signal_boost }}
-Bypass:        ${{ github.event.inputs.enable_integrity_bypass }}
-Full Security: ${{ github.event.inputs.enable_full_security }}
-LTO:           ${{ github.event.inputs.enable_lto }}
-
-Security Tiers:
-  T1: Memory Hardening     (INIT_ON_ALLOC/FREE, KFENCE, PAGE_POISON)
-  T2: Kernel Hardening     (KASLR, STACKLEAK, RANDSTRUCT, VMAP_STACK)
-  T3: ARM64 Hardware       (PAC, BTI, MTE, SCS, KPTI, CFI)
-  T4: Network Security     (Netfilter, XDP, WireGuard, IPsec)
-  T5: eBPF + LSM           (BPF_LSM, Seccomp-BPF, BPF JIT harden)
-  T6: Crypto               (AES-CE, ChaCha20, BLAKE2, DRBG, no MD5/RC4)
-  T7: Audit + IMA/EVM      (IMA appraise, EVM, full audit)
-  T8: Process/Namespace    (Yama, cgroups, capabilities, namespaces)
-  +   Spectre/Meltdown     (KPTI, PAC, branch predictor hardening)
-  +   Covert Channel        (timing attack mitigations)
-  +   Android Security      (Binder, Keystore, Verified Boot)
-  +   Qualcomm Security     (SCM, TrustZone integration)
-============================================
-INFOEOF
-
-          # Copy kernel
-          if [ -f "../kernel/out/arch/arm64/boot/Image" ]; then
-            cp ../kernel/out/arch/arm64/boot/Image .
-          elif [ -f "../kernel/out/arch/arm64/boot/Image.gz" ]; then
-            cp ../kernel/out/arch/arm64/boot/Image.gz .
-          else
-            echo "ERROR: kernel image tidak ditemukan"; exit 1
-          fi
-
-          # Copy modules
-          if [ -d "../kernel/out" ]; then
-            mkdir -p modules/vendor/lib/modules
-            find ../kernel/out -name "*.ko" \
-              -exec cp {} modules/vendor/lib/modules/ \; 2>/dev/null || true
-          fi
-
-          ZIP_NAME="Marble-FullPower-BakaSU-${BUILD_DATE}.zip"
-          zip -r9 "../${ZIP_NAME}" * -x "*.git*"
-          echo "ZIP_OUTPUT=${ZIP_NAME}" >> $GITHUB_ENV
-          echo ">>> ZIP: ${ZIP_NAME}"
+          D=$(date +"%Y%m%d-%H%M")
+          ZIP="Marble-FullPower-BakaSU-${D}.zip"
+          zip -r9 "../${ZIP}" * -x "*.git*"
+          echo "ZIP_OUTPUT=${ZIP}" >> $GITHUB_ENV
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Marble-FullPower-Kernel-BakaSU
+          name: Marble-FullPower-BakaSU
           path: ${{ env.ZIP_OUTPUT }}
           retention-days: 14
