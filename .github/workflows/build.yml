@@ -321,17 +321,25 @@ jobs:
                   ls.insert(li+1, spoof); src="\n".join(ls)
               src=re.sub(r'seq_puts\(m,\s*saved_command_line\)','seq_puts(m, spoof_cmdline(saved_command_line))',src)
               open(f,"w",encoding="utf-8").write(src); print(f"{f}: spoofed")
-          # patch dm-verity
+          # patch dm-verity - safe approach: wrap verity_verify_io to always return 0
           f = "drivers/md/dm-verity-target.c"
           if os.path.isfile(f):
               src = open(f, encoding="utf-8", errors="replace").read()
-              ls=[]; skip=False
-              for l in src.split("\n"):
-                  if "bio->bi_status &&" in l or "verity_fec_is_erasure" in l:
-                      ls.append("\t\tbio->bi_status = BLK_STS_OK; /* bypass */"); continue
-                  if "verity_finish_io(io, bio->bi_status)" in l: continue
-                  ls.append(l)
-              open(f,"w",encoding="utf-8").write("\n".join(ls)); print(f"{f}: bypassed")
+              import re as _re
+              # patch verity_verify_io to immediately return 0 (success)
+              src = _re.sub(
+                  r'(static\s+int\s+verity_verify_io\s*\([^)]*\)\s*\{)',
+                  r'\1\n\treturn 0; /* bypass: skip verification */',
+                  src
+              )
+              # patch verity_end_io: clear error status before any check
+              src = _re.sub(
+                  r'(static\s+void\s+verity_end_io\s*\([^)]*\)\s*\{)',
+                  r'\1\n\tbio->bi_status = BLK_STS_OK; /* bypass */',
+                  src
+              )
+              open(f,"w",encoding="utf-8").write(src)
+              print(f"{f}: bypassed safely")
           # patch lockdown
           f = "security/lockdown/lockdown.c"
           if os.path.isfile(f):
@@ -349,44 +357,66 @@ jobs:
           PYEOF
 
           cat > /tmp/patch_bbr2.py << 'PYEOF'
-          import os, sys
+          import os, sys, re
           profile = sys.argv[1] if len(sys.argv)>1 else "bbr2_tuned"
-          if profile == "bbr2_tuned" and not os.path.isfile("net/ipv4/tcp_bbr2.c"):
-              code = """/* TCP BBR2 backport for kernel 5.10 */
-          #include <linux/module.h>
-          #include <net/tcp.h>
-          static struct tcp_congestion_ops tcp_bbr2 __read_mostly = {
-              .flags = TCP_CONG_NON_RESTRICTED, .name = "bbr2",
-              .owner = THIS_MODULE, .init = bbr_init,
-              .cong_control = bbr_main, .sndbuf_expand = bbr_sndbuf_expand,
-              .undo_cwnd = bbr_undo_cwnd, .cwnd_event = bbr_cwnd_event,
-              .ssthresh = bbr_ssthresh, .tso_segs = bbr_tso_segs,
-              .get_info = bbr_get_info, .set_state = bbr_set_state,
+
+          # BBR2 fix: append alias registration INSIDE tcp_bbr.c
+          # so it shares the same static functions — no undeclared identifier errors
+          if profile == "bbr2_tuned" and os.path.isfile("net/ipv4/tcp_bbr.c"):
+              src = open("net/ipv4/tcp_bbr.c", encoding="utf-8").read()
+
+              if "bbr2" not in src:
+                  # find the existing module_init call and inject before it
+                  bbr2_addon = """
+          /* BBR2 alias - registered alongside BBR1 in same module */
+          static struct tcp_congestion_ops tcp_bbr2_ops __read_mostly = {
+              .flags         = TCP_CONG_NON_RESTRICTED,
+              .name          = "bbr2",
+              .owner         = THIS_MODULE,
+              .init          = bbr_init,
+              .cong_control  = bbr_main,
+              .sndbuf_expand = bbr_sndbuf_expand,
+              .undo_cwnd     = bbr_undo_cwnd,
+              .cwnd_event    = bbr_cwnd_event,
+              .ssthresh      = bbr_ssthresh,
+              .tso_segs      = bbr_tso_segs,
+              .get_info      = bbr_get_info,
+              .set_state     = bbr_set_state,
           };
-          static int __init bbr2_reg(void) { return tcp_register_congestion_control(&tcp_bbr2); }
-          static void __exit bbr2_unreg(void) { tcp_unregister_congestion_control(&tcp_bbr2); }
-          module_init(bbr2_reg); module_exit(bbr2_unreg);
-          MODULE_LICENSE("Dual BSD/GPL"); MODULE_DESCRIPTION("TCP BBR v2 backport");
           """
-              open("net/ipv4/tcp_bbr2.c","w").write(code)
-              mf = open("net/ipv4/Makefile").read()
-              if "tcp_bbr2" not in mf:
-                  open("net/ipv4/Makefile","a").write("obj-$(CONFIG_TCP_CONG_BBR2) += tcp_bbr2.o\n")
-              kc = open("net/ipv4/Kconfig").read()
-              if "TCP_CONG_BBR2" not in kc:
-                  open("net/ipv4/Kconfig","a").write("""
-          config TCP_CONG_BBR2
-          \ttristate "BBR v2 TCP"
-          \tdefault m
-          \thelp
-          \t  BBR v2 backport.
-          """)
-              print("BBR2 added")
+                  # inject before module_init
+                  src = re.sub(
+                      r'(static\s+int\s+__init\s+bbr_register)',
+                      bbr2_addon + r'\1',
+                      src
+                  )
+
+                  # patch existing bbr_register to also register bbr2
+                  src = re.sub(
+                      r'(return\s+tcp_register_congestion_control\s*\(&tcp_bbr_cong_ops\s*\)\s*;)',
+                      r'tcp_register_congestion_control(&tcp_bbr2_ops);\n\t\1',
+                      src
+                  )
+
+                  # patch bbr_unregister to also unregister bbr2
+                  src = re.sub(
+                      r'(tcp_unregister_congestion_control\s*\(&tcp_bbr_cong_ops\s*\)\s*;)',
+                      r'\1\n\ttcp_unregister_congestion_control(&tcp_bbr2_ops);',
+                      src
+                  )
+
+                  open("net/ipv4/tcp_bbr.c", "w", encoding="utf-8").write(src)
+                  print(">>> BBR2 alias added to tcp_bbr.c")
+              else:
+                  print(">>> BBR2 already present in tcp_bbr.c")
+
+          # Tune BBR params
           if os.path.isfile("net/ipv4/tcp_bbr.c"):
-              src = open("net/ipv4/tcp_bbr.c").read()
-              src = src.replace("bbr_min_rtt_win_sec = 10","bbr_min_rtt_win_sec = 5")
-              src = src.replace("bbr_probe_rtt_mode_ms = 200","bbr_probe_rtt_mode_ms = 100")
-              open("net/ipv4/tcp_bbr.c","w").write(src); print("BBR tuned")
+              src = open("net/ipv4/tcp_bbr.c", encoding="utf-8").read()
+              src = src.replace("bbr_min_rtt_win_sec = 10", "bbr_min_rtt_win_sec = 5")
+              src = src.replace("bbr_probe_rtt_mode_ms = 200", "bbr_probe_rtt_mode_ms = 100")
+              open("net/ipv4/tcp_bbr.c", "w", encoding="utf-8").write(src)
+              print(">>> BBR params tuned")
           PYEOF
 
           cat > /tmp/gen_defconfig.py << 'PYEOF'
@@ -444,8 +474,9 @@ jobs:
           }
           cfg.append(gov_map.get(cpu_gov,"CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y"))
 
-          if tcp_profile == "bbr2_tuned":
-              cfg.append("CONFIG_TCP_CONG_BBR2=m")
+          # BBR2 is now an alias inside tcp_bbr.c, no separate module needed
+          # if tcp_profile == "bbr2_tuned":
+          #     cfg.append("CONFIG_TCP_CONG_BBR2=m")
 
           if enable_lto == "true":
               cfg += ["CONFIG_LTO=y","CONFIG_LTO_CLANG=y","CONFIG_THINLTO=y","CONFIG_LTO_CLANG_THIN=y"]
