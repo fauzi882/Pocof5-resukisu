@@ -99,6 +99,14 @@ on:
         options:
           - 'true'
           - 'false'
+      enable_ttl_bypass:
+        description: 'Enable TTL Tethering Bypass'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
 
 permissions:
   contents: read
@@ -230,12 +238,7 @@ jobs:
           [ "$SUSFS_OK" = "true" ] && git add -A && git commit -m "susfs-applied" || true
           echo "SUSFS_APPLIED=$SUSFS_OK" >> $GITHUB_ENV
 
-      - name: Bersihkan Extern Declarations
-        run: |
-          cd kernel
-          python3 /tmp/clean_externs.py 2>/dev/null || true
-          git add -A && git commit -m "clean-externs" || true
-
+      # FIX: Script ditulis SEBELUM step manapun yang menjalankan /tmp/*.py
       - name: Tulis Script Patches
         run: |
           cat > /tmp/clean_externs.py << 'PYEOF'
@@ -302,7 +305,6 @@ jobs:
           import re, os, sys
           bypass = sys.argv[1] if len(sys.argv)>1 else "true"
           if bypass != "true": sys.exit(0)
-          # patch /proc/cmdline
           f = "fs/proc/cmdline.c"
           if os.path.isfile(f):
               src = open(f, encoding="utf-8", errors="replace").read()
@@ -321,33 +323,27 @@ jobs:
                   ls.insert(li+1, spoof); src="\n".join(ls)
               src=re.sub(r'seq_puts\(m,\s*saved_command_line\)','seq_puts(m, spoof_cmdline(saved_command_line))',src)
               open(f,"w",encoding="utf-8").write(src); print(f"{f}: spoofed")
-          # patch dm-verity - safe approach: wrap verity_verify_io to always return 0
           f = "drivers/md/dm-verity-target.c"
           if os.path.isfile(f):
               src = open(f, encoding="utf-8", errors="replace").read()
               import re as _re
-              # patch verity_verify_io to immediately return 0 (success)
               src = _re.sub(
                   r'(static\s+int\s+verity_verify_io\s*\([^)]*\)\s*\{)',
-                  r'\1\n\treturn 0; /* bypass: skip verification */',
+                  r'\1\n\treturn 0; /* bypass */',
                   src
               )
-              # patch verity_end_io: clear error status before any check
               src = _re.sub(
                   r'(static\s+void\s+verity_end_io\s*\([^)]*\)\s*\{)',
                   r'\1\n\tbio->bi_status = BLK_STS_OK; /* bypass */',
                   src
               )
-              open(f,"w",encoding="utf-8").write(src)
-              print(f"{f}: bypassed safely")
-          # patch lockdown
+              open(f,"w",encoding="utf-8").write(src); print(f"{f}: verity bypassed")
           f = "security/lockdown/lockdown.c"
           if os.path.isfile(f):
               src = open(f, encoding="utf-8", errors="replace").read()
               src = re.sub(r'(static\s+int\s+lockdown_is_locked_down\s*\([^)]*\)\s*\{)',
                   r'\1\n\treturn 0; /* bypass */', src)
               open(f,"w",encoding="utf-8").write(src); print(f"{f}: lockdown bypassed")
-          # patch qcom scm
           for f in ["drivers/firmware/qcom/qcom_scm.c","drivers/firmware/qcom_scm.c"]:
               if not os.path.isfile(f): continue
               src = open(f, encoding="utf-8", errors="replace").read()
@@ -360,32 +356,21 @@ jobs:
           import os, sys, re
           profile = sys.argv[1] if len(sys.argv)>1 else "bbr2_tuned"
 
-          # BBR2 fix: append alias registration INSIDE tcp_bbr.c
-          # so it shares the same static functions — no undeclared identifier errors
           if profile == "bbr2_tuned" and os.path.isfile("net/ipv4/tcp_bbr.c"):
               src = open("net/ipv4/tcp_bbr.c", encoding="utf-8").read()
-
               if "bbr2" not in src:
-                  # Dynamically extract the existing BBR1 ops struct fields
-                  # so we only use fields that actually exist in this kernel version
                   bbr1_struct = re.search(
                       r'static\s+struct\s+tcp_congestion_ops\s+tcp_bbr_cong_ops\s*[^=]*=\s*\{([^}]+)\}',
                       src, re.DOTALL
                   )
                   if bbr1_struct:
                       fields_raw = bbr1_struct.group(1)
-                      # Replace .name value only, keep all other fields as-is
-                      fields_bbr2 = re.sub(
-                          r'(\.name\s*=\s*)"bbr"',
-                          r'\1"bbr2"',
-                          fields_raw
-                      )
+                      fields_bbr2 = re.sub(r'(\.name\s*=\s*)"bbr"', r'\1"bbr2"', fields_raw)
                       bbr2_addon = f"""
           /* BBR2 alias - same as BBR1 with different name */
           static struct tcp_congestion_ops tcp_bbr2_ops __read_mostly = {{{fields_bbr2}}};
           """
                   else:
-                      # Fallback: minimal safe struct with only guaranteed fields
                       bbr2_addon = """
           /* BBR2 alias - minimal safe definition */
           static struct tcp_congestion_ops tcp_bbr2_ops __read_mostly = {
@@ -401,33 +386,20 @@ jobs:
               .set_state    = bbr_set_state,
           };
           """
-                  # inject before module_init
-                  src = re.sub(
-                      r'(static\s+int\s+__init\s+bbr_register)',
-                      bbr2_addon + r'\1',
-                      src
-                  )
-
-                  # patch existing bbr_register to also register bbr2
+                  src = re.sub(r'(static\s+int\s+__init\s+bbr_register)', bbr2_addon + r'\1', src)
                   src = re.sub(
                       r'(return\s+tcp_register_congestion_control\s*\(&tcp_bbr_cong_ops\s*\)\s*;)',
-                      r'tcp_register_congestion_control(&tcp_bbr2_ops);\n\t\1',
-                      src
+                      r'tcp_register_congestion_control(&tcp_bbr2_ops);\n\t\1', src
                   )
-
-                  # patch bbr_unregister to also unregister bbr2
                   src = re.sub(
                       r'(tcp_unregister_congestion_control\s*\(&tcp_bbr_cong_ops\s*\)\s*;)',
-                      r'\1\n\ttcp_unregister_congestion_control(&tcp_bbr2_ops);',
-                      src
+                      r'\1\n\ttcp_unregister_congestion_control(&tcp_bbr2_ops);', src
                   )
-
                   open("net/ipv4/tcp_bbr.c", "w", encoding="utf-8").write(src)
                   print(">>> BBR2 alias added to tcp_bbr.c")
               else:
                   print(">>> BBR2 already present in tcp_bbr.c")
 
-          # Tune BBR params
           if os.path.isfile("net/ipv4/tcp_bbr.c"):
               src = open("net/ipv4/tcp_bbr.c", encoding="utf-8").read()
               src = src.replace("bbr_min_rtt_win_sec = 10", "bbr_min_rtt_win_sec = 5")
@@ -448,12 +420,13 @@ jobs:
           bypass       = sys.argv[8]
           dolby        = sys.argv[9]
           gps          = sys.argv[10]
+          ttl_bypass   = sys.argv[11] if len(sys.argv) > 11 else "true"
 
           cfg = [
               # KSU
               "CONFIG_WERROR=n","CONFIG_KSU=y","CONFIG_KPROBES=y",
               "CONFIG_HAVE_KPROBES=y","CONFIG_KPROBE_EVENTS=y",
-              # TCP
+              # TCP/BBR
               "CONFIG_TCP_CONG_ADVANCED=y","CONFIG_TCP_CONG_BBR=y",
               "CONFIG_TCP_CONG_CUBIC=y","CONFIG_TCP_CONG_RENO=y",
               'CONFIG_DEFAULT_TCP_CONG="bbr"',
@@ -466,11 +439,10 @@ jobs:
               # Scheduler
               "CONFIG_CFS_BANDWIDTH=y","CONFIG_RT_GROUP_SCHED=y",
               "CONFIG_SCHED_AUTOGROUP=y","CONFIG_PREEMPT=y","CONFIG_HZ_300=y",
-              # Memory
+              # Memory + IO
               "CONFIG_ZSMALLOC=y","CONFIG_ZRAM=y","CONFIG_ZRAM_DEF_COMP_LZ4=y",
               "CONFIG_TRANSPARENT_HUGEPAGE=y","CONFIG_TRANSPARENT_HUGEPAGE_MADVISE=y",
               "CONFIG_ZSWAP=y","CONFIG_KSM=y","CONFIG_COMPACTION=y",
-              # I/O
               "CONFIG_MQ_IOSCHED_DEADLINE=y","CONFIG_MQ_IOSCHED_KYBER=y",
               "CONFIG_IOSCHED_BFQ=y","CONFIG_BFQ_GROUP_IOSCHED=y",
               # Security base
@@ -491,10 +463,6 @@ jobs:
           }
           cfg.append(gov_map.get(cpu_gov,"CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y"))
 
-          # BBR2 is now an alias inside tcp_bbr.c, no separate module needed
-          # if tcp_profile == "bbr2_tuned":
-          #     cfg.append("CONFIG_TCP_CONG_BBR2=m")
-
           if enable_lto == "true":
               cfg += ["CONFIG_LTO=y","CONFIG_LTO_CLANG=y","CONFIG_THINLTO=y","CONFIG_LTO_CLANG_THIN=y"]
 
@@ -508,21 +476,21 @@ jobs:
 
           if full_sec == "true":
               cfg += [
-                  # T1: Memory
+                  # T1: Memory hardening
                   "CONFIG_INIT_ON_ALLOC_DEFAULT_ON=y","CONFIG_INIT_ON_FREE_DEFAULT_ON=y",
                   "CONFIG_SLAB_FREELIST_RANDOM=y","CONFIG_SLAB_FREELIST_HARDENED=y",
                   "CONFIG_SHUFFLE_PAGE_ALLOCATOR=y","CONFIG_FORTIFY_SOURCE=y",
                   "CONFIG_HARDENED_USERCOPY=y","CONFIG_KFENCE=y",
                   "CONFIG_VMAP_STACK=y","CONFIG_THREAD_INFO_IN_TASK=y",
                   "CONFIG_REFCOUNT_FULL=y","CONFIG_PAGE_POISONING=y",
-                  # T2: Hardening
+                  # T2: Code hardening
                   "CONFIG_STACKPROTECTOR=y","CONFIG_STACKPROTECTOR_STRONG=y",
                   "CONFIG_STRICT_KERNEL_RWX=y","CONFIG_STRICT_MODULE_RWX=y",
                   "CONFIG_RANDOMIZE_BASE=y","CONFIG_RANDOMIZE_MODULE_REGION_FULL=y",
                   "CONFIG_LATENT_ENTROPY=y","CONFIG_GCC_PLUGIN_LATENT_ENTROPY=y",
                   "CONFIG_GCC_PLUGIN_STRUCTLEAK=y","CONFIG_GCC_PLUGIN_STRUCTLEAK_BYREF_ALL=y",
                   "CONFIG_GCC_PLUGIN_STACKLEAK=y","CONFIG_GCC_PLUGIN_RANDSTRUCT=y",
-                  # T3: ARM64
+                  # T3: ARM64 PAC + BTI + CFI + KPTI + MTE
                   "CONFIG_ARM64_PTR_AUTH=y","CONFIG_ARM64_PTR_AUTH_KERNEL=y",
                   "CONFIG_ARM64_BTI=y","CONFIG_ARM64_BTI_KERNEL=y",
                   "CONFIG_ARM64_MTE=y","CONFIG_SHADOW_CALL_STACK=y",
@@ -530,16 +498,20 @@ jobs:
                   "CONFIG_UNMAP_KERNEL_AT_EL0=y","CONFIG_HARDEN_BRANCH_PREDICTOR=y",
                   "CONFIG_MITIGATE_SPECTRE_BRANCH_HISTORY=y",
                   "CONFIG_CFI_CLANG=y","CONFIG_CFI_PERMISSIVE=n",
-                  # T4: Network
+                  # T4: Network Security + WireGuard
                   "CONFIG_NETFILTER=y","CONFIG_NF_CONNTRACK=y","CONFIG_NF_TABLES=y",
                   "CONFIG_NETFILTER_ADVANCED=y","CONFIG_XFRM=y","CONFIG_XFRM_USER=y",
                   "CONFIG_INET_ESP=y","CONFIG_INET_AH=y","CONFIG_WIREGUARD=y",
                   "CONFIG_IP_NF_IPTABLES=y","CONFIG_IP_NF_FILTER=y",
                   "CONFIG_IP6_NF_IPTABLES=y","CONFIG_IP6_NF_FILTER=y",
-                  # T5: eBPF
+                  # TTL manipulation - tethering bypass
+                  "CONFIG_NETFILTER_XT_TARGET_TTL=y",
+                  "CONFIG_IP6_NF_TARGET_HL=y",
+                  "CONFIG_NETFILTER_XT_MATCH_TTL=y",
+                  # T5: eBPF + BPF LSM
                   "CONFIG_BPF_EVENTS=y","CONFIG_BPF_LSM=y","CONFIG_SECURITY_BPFLSM=y",
                   "CONFIG_BPF_STREAM_PARSER=y",
-                  # T6: Crypto
+                  # T6: ARM64 Crypto Hardware
                   "CONFIG_CRYPTO_AES=y","CONFIG_CRYPTO_AES_ARM64_CE=y",
                   "CONFIG_CRYPTO_CHACHA20POLY1305=y","CONFIG_CRYPTO_SHA256_ARM64=y",
                   "CONFIG_CRYPTO_SHA3_ARM64=y","CONFIG_CRYPTO_BLAKE2S=y",
@@ -548,20 +520,28 @@ jobs:
                   "CONFIG_HW_RANDOM=y","CONFIG_HW_RANDOM_QCOM=y",
                   "# CONFIG_CRYPTO_MD5 is not set",
                   "# CONFIG_CRYPTO_DES is not set","# CONFIG_CRYPTO_RC4 is not set",
-                  # T7: Audit+IMA
+                  # T7: Audit + IMA
                   "CONFIG_AUDIT=y","CONFIG_AUDITSYSCALL=y","CONFIG_AUDIT_WATCH=y",
                   "CONFIG_INTEGRITY=y","CONFIG_IMA=y","CONFIG_IMA_APPRAISE=y",
                   "CONFIG_EVM=y",
-                  # T8: Process
+                  # T8: Namespaces + cgroups
                   "CONFIG_SECURITY_YAMA=y","CONFIG_NAMESPACES=y",
                   "CONFIG_USER_NS=y","CONFIG_PID_NS=y","CONFIG_NET_NS=y",
                   "CONFIG_CGROUPS=y","CONFIG_CGROUP_BPF=y","CONFIG_MEMCG=y",
                   "CONFIG_BLK_CGROUP=y","CONFIG_CPUSETS=y",
-                  # Android
+                  # Android-specific
                   "CONFIG_ANDROID_PARANOID_NETWORK=y","CONFIG_ANDROID_BINDER_IPC=y",
                   "CONFIG_TRUSTED_KEYS=y","CONFIG_ENCRYPTED_KEYS=y",
                   "CONFIG_FS_ENCRYPTION=y","CONFIG_FS_VERITY=y",
                   "CONFIG_DM_CRYPT=y","CONFIG_DM_INTEGRITY=y","CONFIG_DM_VERITY=y",
+              ]
+          elif ttl_bypass == "true":
+              # TTL configs tanpa full_sec
+              cfg += [
+                  "CONFIG_NETFILTER=y","CONFIG_IP_NF_IPTABLES=y","CONFIG_IP6_NF_IPTABLES=y",
+                  "CONFIG_NETFILTER_XT_TARGET_TTL=y",
+                  "CONFIG_IP6_NF_TARGET_HL=y",
+                  "CONFIG_NETFILTER_XT_MATCH_TTL=y",
               ]
 
           if gps == "true":
@@ -596,7 +576,7 @@ jobs:
           print(f">>> {len(cfg)} configs written to defconfig")
           PYEOF
 
-          echo ">>> Script files written"
+          echo ">>> Semua script patch berhasil ditulis ke /tmp/"
 
       - name: Run Bersihkan Extern
         run: |
@@ -626,81 +606,46 @@ jobs:
           path = sys.argv[1]
           with open(path, encoding="utf-8", errors="replace") as f:
               src = f.read()
-          # Only patch the DEFAULT VALUE assignments inside struct definitions
-          # not macro/attribute lines - safe regex targeting initializer only
-          src = re.sub(
-              r'(\.up_rate_limit_us\s*=\s*USEC_PER_MSEC\s*\*\s*)\d+',
-              r'\g<1>1',
-              src
-          )
-          src = re.sub(
-              r'(\.down_rate_limit_us\s*=\s*USEC_PER_MSEC\s*\*\s*)\d+',
-              r'\g<1>2',
-              src
-          )
-          # Also patch static const defaults if present (not in __ATTR_RW)
-          src = re.sub(
-              r'(?<!ATTR)(up_rate_limit_us\s*=\s*)(\d+)(\s*;)',
-              r'\g<1>500\g<3>',
-              src
-          )
-          src = re.sub(
-              r'(?<!ATTR)(down_rate_limit_us\s*=\s*)(\d+)(\s*;)',
-              r'\g<1>2000\g<3>',
-              src
-          )
+          src = re.sub(r'(\.up_rate_limit_us\s*=\s*USEC_PER_MSEC\s*\*\s*)\d+', r'\g<1>1', src)
+          src = re.sub(r'(\.down_rate_limit_us\s*=\s*USEC_PER_MSEC\s*\*\s*)\d+', r'\g<1>2', src)
+          src = re.sub(r'(?<!ATTR)(up_rate_limit_us\s*=\s*)(\d+)(\s*;)', r'\g<1>500\g<3>', src)
+          src = re.sub(r'(?<!ATTR)(down_rate_limit_us\s*=\s*)(\d+)(\s*;)', r'\g<1>2000\g<3>', src)
           with open(path, "w", encoding="utf-8") as f:
               f.write(src)
           print(">>> schedutil: rate limits tuned safely")
           PYEOF
           fi
-          # fair.c - tune sched latency (safe string replace)
           if [ -f "kernel/sched/fair.c" ]; then
             python3 - kernel/sched/fair.c << 'PYEOF'
           import re, sys
           path = sys.argv[1]
           with open(path, encoding="utf-8", errors="replace") as f:
               src = f.read()
-          # Only replace the sched_latency_ns default value assignment
-          src = re.sub(
-              r'(sched_latency_ns\s*=\s*)6000000ULL',
-              r'\g<1>4000000ULL',
-              src
-          )
+          src = re.sub(r'(sched_latency_ns\s*=\s*)6000000ULL', r'\g<1>4000000ULL', src)
           with open(path, "w", encoding="utf-8") as f:
               f.write(src)
           print(">>> fair.c: sched_latency_ns tuned")
           PYEOF
           fi
-          # vmscan.c - tune swappiness default
           if [ -f "mm/vmscan.c" ]; then
             python3 - mm/vmscan.c << 'PYEOF'
           import re, sys
           path = sys.argv[1]
           with open(path, encoding="utf-8", errors="replace") as f:
               src = f.read()
-          src = re.sub(
-              r'(vm_swappiness\s*=\s*)60(\s*[;,])',
-              r'\g<1>100\g<2>',
-              src
-          )
+          src = re.sub(r'(vm_swappiness\s*=\s*)60(\s*[;,])', r'\g<1>100\g<2>', src)
           with open(path, "w", encoding="utf-8") as f:
               f.write(src)
-          print(">>> vmscan.c: swappiness tuned")
+          print(">>> vmscan.c: swappiness tuned to 100")
           PYEOF
           fi
-          # mq-deadline - tune fifo_batch
           if [ -f "block/mq-deadline.c" ]; then
             python3 - block/mq-deadline.c << 'PYEOF'
           import re, sys
           path = sys.argv[1]
           with open(path, encoding="utf-8", errors="replace") as f:
               src = f.read()
-          src = re.sub(
-              r'(dd->fifo_batch\s*=\s*)\d+(\s*[;,])',
-              r'\g<1>8\g<2>',
-              src
-          )
+          src = re.sub(r'(dd->fifo_batch\s*=\s*)\d+(\s*[;,])', r'\g<1>8\g<2>', src)
           with open(path, "w", encoding="utf-8") as f:
               f.write(src)
           print(">>> mq-deadline.c: fifo_batch tuned")
@@ -711,7 +656,6 @@ jobs:
       - name: Patch GPS Signal Dolby
         run: |
           cd kernel
-          # GPS: patch UART timeout safely
           for f in drivers/tty/serial/msm_geni_serial.c drivers/tty/serial/qcom_geni_serial.c \
                    drivers/gnss/gnss_serial.c; do
             [ -f "$f" ] || continue
@@ -720,7 +664,6 @@ jobs:
           path = sys.argv[1]
           with open(path, encoding="utf-8", errors="replace") as f:
               src = f.read()
-          # Only patch small timeout values (< 200ms) to avoid breaking large ones
           def safe_timeout(m):
               val = int(m.group(1))
               return f"msecs_to_jiffies(500)" if val < 200 else m.group(0)
@@ -730,7 +673,6 @@ jobs:
           print(f">>> {path}: GPS timeout patched")
           PYEOF
           done
-          # Audio: patch QDSP6 timeout safely
           for f in sound/soc/qcom/qdsp6/q6asm.c sound/soc/qcom/qdsp6/q6afe.c; do
             [ -f "$f" ] || continue
             python3 - "$f" << 'PYEOF'
@@ -738,7 +680,6 @@ jobs:
           path = sys.argv[1]
           with open(path, encoding="utf-8", errors="replace") as f:
               src = f.read()
-          # Only patch #define TIMEOUT_MS lines
           src = re.sub(
               r'(#define\s+\w*TIMEOUT\w*\s+)(\d+)',
               lambda m: m.group(1) + "5000" if int(m.group(2)) < 5000 else m.group(0),
@@ -749,7 +690,6 @@ jobs:
           print(f">>> {path}: audio timeout patched")
           PYEOF
           done
-          # Signal: patch WiFi TX power safely
           for f in drivers/net/wireless/ath/ath11k/mac.c \
                    drivers/net/wireless/ath/ath10k/mac.c; do
             [ -f "$f" ] || continue
@@ -758,12 +698,7 @@ jobs:
           path = sys.argv[1]
           with open(path, encoding="utf-8", errors="replace") as f:
               src = f.read()
-          # Only patch #define ATH_MAX_POWER_LEVEL lines
-          src = re.sub(
-              r'(#define\s+ATH_MAX_POWER_LEVEL\s+)\d+',
-              r'\g<1>60',
-              src
-          )
+          src = re.sub(r'(#define\s+ATH_MAX_POWER_LEVEL\s+)\d+', r'\g<1>60', src)
           with open(path, "w", encoding="utf-8") as f:
               f.write(src)
           print(f">>> {path}: TX power patched")
@@ -791,7 +726,8 @@ jobs:
             "${{ github.event.inputs.enable_full_security }}" \
             "${{ github.event.inputs.enable_integrity_bypass }}" \
             "${{ github.event.inputs.enable_dolby }}" \
-            "${{ github.event.inputs.enable_gps_fix }}"
+            "${{ github.event.inputs.enable_gps_fix }}" \
+            "${{ github.event.inputs.enable_ttl_bypass }}"
           git add -A && git commit -m "defconfig-full-power" || true
 
       - name: Kompilasi Kernel
@@ -854,8 +790,11 @@ jobs:
 
           cat > marble_tune.sh << 'TUNEEOF'
           #!/system/bin/sh
+          # Marble FullPower - post-boot tuning
           while [ "$(getprop sys.boot_completed)" != "1" ]; do sleep 2; done
           sleep 3
+
+          # === Integrity Spoof via resetprop ===
           resetprop -n ro.boot.verifiedbootstate green
           resetprop -n ro.boot.vbmeta.device_state locked
           resetprop -n ro.boot.flash.locked 1
@@ -866,56 +805,165 @@ jobs:
           resetprop -n ro.build.type user
           resetprop -n ro.build.tags release-keys
           resetprop -n vendor.boot.verifiedbootstate green
+
+          # === Kernel Security ===
           echo 1 > /proc/sys/kernel/kptr_restrict
           echo 1 > /proc/sys/kernel/dmesg_restrict
           echo 2 > /proc/sys/kernel/randomize_va_space
           echo 1 > /proc/sys/fs/protected_hardlinks
           echo 1 > /proc/sys/fs/protected_symlinks
           echo 0 > /proc/sys/kernel/sysrq
+
+          # === Network Security ===
           echo 1 > /proc/sys/net/ipv4/tcp_syncookies
           echo 0 > /proc/sys/net/ipv4/tcp_timestamps
           echo 1 > /proc/sys/net/ipv4/conf/all/rp_filter
           echo 0 > /proc/sys/net/ipv4/conf/all/accept_redirects
           echo 0 > /proc/sys/net/ipv4/conf/all/send_redirects
           echo 1 > /proc/sys/net/ipv4/icmp_echo_ignore_broadcasts
-          echo bbr > /proc/sys/net/ipv4/tcp_congestion_control
-          echo fq > /proc/sys/net/core/default_qdisc
-          echo 0 > /proc/sys/net/ipv4/tcp_slow_start_after_idle
-          echo 1 > /proc/sys/net/ipv4/tcp_fastopen
-          echo 2 > /proc/sys/net/core/bpf_jit_harden
+
+          # === BBR TCP Tuning ===
+          echo bbr  > /proc/sys/net/ipv4/tcp_congestion_control
+          echo fq   > /proc/sys/net/core/default_qdisc
+          echo 0    > /proc/sys/net/ipv4/tcp_slow_start_after_idle
+          echo 3    > /proc/sys/net/ipv4/tcp_fastopen
+          echo 2    > /proc/sys/net/core/bpf_jit_harden
+          echo 1    > /proc/sys/net/ipv4/tcp_sack
+          echo 1    > /proc/sys/net/ipv4/tcp_window_scaling
+          echo 1    > /proc/sys/net/ipv4/tcp_low_latency
           echo 4194304 > /proc/sys/net/core/rmem_max
           echo 4194304 > /proc/sys/net/core/wmem_max
+          echo "4096 87380 4194304" > /proc/sys/net/ipv4/tcp_rmem
+          echo "4096 65536 4194304" > /proc/sys/net/ipv4/tcp_wmem
+
+          # === TTL Manipulation (bypass tethering detection) ===
+          if command -v iptables >/dev/null 2>&1; then
+            iptables  -t mangle -D POSTROUTING -j TTL --ttl-set 65 2>/dev/null || true
+            iptables  -t mangle -A POSTROUTING -j TTL --ttl-set 65 2>/dev/null || true
+          fi
+          if command -v ip6tables >/dev/null 2>&1; then
+            ip6tables -t mangle -D POSTROUTING -j HL  --hl-set  65 2>/dev/null || true
+            ip6tables -t mangle -A POSTROUTING -j HL  --hl-set  65 2>/dev/null || true
+          fi
+
+          # === Signal + Radio Tuning ===
           resetprop -n persist.vendor.radio.add_power_save 0
           resetprop -n persist.vendor.radio.apm_sim_not_pwdn 1
           resetprop -n persist.vendor.radio.sib16_support 1
+          resetprop -n persist.vendor.radio.data_con_rprt 1
+          resetprop -n persist.vendor.radio.force_on_dc 1
+          resetprop -n persist.radio.calls.on.ims true
+          resetprop -n persist.vendor.radio.mt_sms_ack 30
+
+          # === GPS Tuning ===
           resetprop -n persist.gps.qc_nlp_in_use 1
           resetprop -n ro.gps.agps_provider 1
+          resetprop -n persist.gps.nmea_prio_fix 1
+          resetprop -n persist.gps.lge_qmi_on true
+
+          # === Audio (Dolby) Tuning ===
           resetprop -n audio.deep_buffer.media true
           resetprop -n audio.offload.gapless.enabled true
           resetprop -n persist.audio.fluence.speaker true
           resetprop -n persist.vendor.audio.fluence.for.speaker true
+          resetprop -n persist.audio.feature.highqualityaudio true
+
+          # === CPU Governor ===
           for p in /sys/devices/system/cpu/cpufreq/policy*; do
             echo schedutil > "$p/scaling_governor" 2>/dev/null || true
             echo 500  > "$p/schedutil/up_rate_limit_us" 2>/dev/null || true
             echo 2000 > "$p/schedutil/down_rate_limit_us" 2>/dev/null || true
           done
+
+          # === Memory Tuning ===
           echo 100 > /proc/sys/vm/swappiness
           echo 10  > /proc/sys/vm/dirty_ratio
           echo 5   > /proc/sys/vm/dirty_background_ratio
+          echo 300 > /proc/sys/vm/dirty_expire_centisecs
+          echo 500 > /proc/sys/vm/dirty_writeback_centisecs
+          echo 1   > /proc/sys/vm/overcommit_memory
+
+          # === ZRAM Activation (75% RAM, lz4) ===
+          if [ -b /dev/block/zram0 ]; then
+            swapoff /dev/block/zram0 2>/dev/null || true
+            echo 1 > /sys/block/zram0/reset 2>/dev/null || true
+            RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+            ZRAM_SIZE=$((RAM_KB * 1024 * 3 / 4))
+            echo $ZRAM_SIZE > /sys/block/zram0/disksize 2>/dev/null || true
+            echo lz4 > /sys/block/zram0/comp_algorithm 2>/dev/null || true
+            mkswap /dev/block/zram0 2>/dev/null || true
+            swapon /dev/block/zram0 -p 32767 2>/dev/null || true
+          fi
+
+          # === I/O Scheduler ===
           for q in /sys/block/*/queue; do
             [ -d "$q" ] || continue
             echo mq-deadline > "$q/scheduler" 2>/dev/null || true
             echo 64 > "$q/read_ahead_kb" 2>/dev/null || true
             echo 0  > "$q/add_random" 2>/dev/null || true
+            echo 2  > "$q/rq_affinity" 2>/dev/null || true
           done
+
           setenforce 0 2>/dev/null || true
           log -t marble-fp "Post-boot tuning done - FULL POWER"
           TUNEEOF
           chmod 755 marble_tune.sh
 
+          # === Emergency Backup Script ===
+          cat > marble_emergency.sh << 'EMEOF'
+          #!/system/bin/sh
+          # Marble Emergency Boot Backup/Restore
+          # Usage: marble_emergency.sh backup|restore|list [slot_suffix]
+          CMD="${1:-backup}"
+          SLOT="${2:-$(getprop ro.boot.slot_suffix)}"
+          BOOT_PART=""
+          for p in "/dev/block/bootdevice/by-name/boot${SLOT}" \
+                   /dev/block/platform/*/by-name/boot${SLOT} \
+                   "/dev/block/by-name/boot${SLOT}"; do
+            [ -b "$p" ] && { BOOT_PART="$p"; break; }
+          done
+          [ -z "$BOOT_PART" ] && { echo "ERROR: boot partition not found for slot '${SLOT}'"; exit 1; }
+          BACKUP_DIR="/data/local/marble_backup"
+          mkdir -p "$BACKUP_DIR"
+          BACKUP_FILE="$BACKUP_DIR/boot${SLOT}_$(date +%Y%m%d_%H%M%S).img"
+          LATEST_LINK="$BACKUP_DIR/boot${SLOT}_latest.img"
+          case "$CMD" in
+            backup)
+              echo ">>> Backing up: $BOOT_PART -> $BACKUP_FILE"
+              dd if="$BOOT_PART" of="$BACKUP_FILE" bs=4096 2>&1
+              if [ $? -eq 0 ]; then
+                ln -sf "$BACKUP_FILE" "$LATEST_LINK"
+                echo ">>> Backup OK: $BACKUP_FILE"
+                SIZE=$(du -sh "$BACKUP_FILE" | cut -f1)
+                echo ">>> Size: $SIZE"
+              else
+                echo "ERROR: backup failed"; exit 1
+              fi
+              ;;
+            restore)
+              [ -f "$LATEST_LINK" ] || { echo "ERROR: no backup found at $LATEST_LINK"; exit 1; }
+              REAL=$(readlink -f "$LATEST_LINK")
+              echo ">>> Restoring: $REAL -> $BOOT_PART"
+              dd if="$LATEST_LINK" of="$BOOT_PART" bs=4096 2>&1
+              [ $? -eq 0 ] && echo ">>> Restore OK — reboot to apply" \
+                           || { echo "ERROR: restore failed"; exit 1; }
+              ;;
+            list)
+              echo ">>> Backups in $BACKUP_DIR:"
+              ls -lh "$BACKUP_DIR/" 2>/dev/null || echo "(no backups found)"
+              ;;
+            *)
+              echo "Usage: $0 backup|restore|list [slot_suffix]"
+              echo "       slot_suffix: _a or _b (auto-detected if omitted)"
+              exit 1
+              ;;
+          esac
+          EMEOF
+          chmod 755 marble_emergency.sh
+
           [ -f "../kernel/out/arch/arm64/boot/Image" ] && cp ../kernel/out/arch/arm64/boot/Image . \
           || { [ -f "../kernel/out/arch/arm64/boot/Image.gz" ] && cp ../kernel/out/arch/arm64/boot/Image.gz .; } \
-          || { echo "ERROR: no kernel image"; exit 1; }
+          || { echo "ERROR: no kernel image found"; exit 1; }
 
           mkdir -p modules/vendor/lib/modules
           find ../kernel/out -name "*.ko" -exec cp {} modules/vendor/lib/modules/ \; 2>/dev/null || true
