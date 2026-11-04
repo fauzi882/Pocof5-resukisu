@@ -732,6 +732,22 @@ jobs:
               "geni_se_abort_m_cmd",
               "geni_se_abort_s_cmd",
               "geni_se_dump_dbg_regs",
+              # clk table symbols
+              "geni_se_clk_tbl_get",
+              "geni_se_clk_freq_match",
+              "geni_se_get_clk_perf_level",
+              "geni_se_set_clk_perf_level",
+              "geni_se_get_num_clk_levels",
+              # iommu / dma
+              "geni_se_iommu_map_buf",
+              "geni_se_iommu_unmap_buf",
+              "geni_se_iommu_map_and_attach",
+              # misc geni_se family
+              "geni_se_remove_earmark_dma",
+              "geni_se_rx_dma_unprep",
+              "geni_se_tx_dma_unprep",
+              "geni_se_common_clk_enable",
+              "geni_se_common_clk_disable",
           ]
 
           patched = []
