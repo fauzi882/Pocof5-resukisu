@@ -706,6 +706,67 @@ jobs:
           done
           git add -A && git commit -m "gps-signal-dolby" || true
 
+      - name: Fix Duplicate Symbol Exports
+        run: |
+          cd kernel
+          python3 - << 'PYEOF'
+          import os, re
+
+          # Simbol yang sudah masuk vmlinux via built-in driver,
+          # harus dihapus dari vendor module agar modpost tidak protes "exported twice"
+          DUPE_SYMS = [
+              "geni_se_init",
+              "geni_se_clks_on",
+              "geni_se_clks_off",
+              "geni_se_resources_on",
+              "geni_se_resources_off",
+              "geni_se_rx_dma_prep",
+              "geni_se_tx_dma_prep",
+              "geni_se_rx_init_itr_buf",
+              "geni_se_select_mode",
+              "geni_se_config_packing",
+              "geni_se_setup_s_cmd",
+              "geni_se_setup_m_cmd",
+              "geni_se_cancel_m_cmd",
+              "geni_se_cancel_s_cmd",
+              "geni_se_abort_m_cmd",
+              "geni_se_abort_s_cmd",
+              "geni_se_dump_dbg_regs",
+          ]
+
+          patched = []
+          for root, dirs, files in os.walk("."):
+              dirs[:] = [d for d in dirs if d not in [".git", "out"]]
+              rel = os.path.relpath(root, ".")
+              # hanya sentuh tree vendor/techpack/platform-msm, bukan upstream driver
+              if not any(x in rel for x in ["techpack", "drivers/platform/msm", "vendor/qcom"]):
+                  continue
+              for fname in files:
+                  if not fname.endswith(".c"):
+                      continue
+                  fp = os.path.join(root, fname)
+                  try:
+                      src = open(fp, encoding="utf-8", errors="replace").read()
+                  except Exception:
+                      continue
+                  changed = False
+                  for sym in DUPE_SYMS:
+                      pat = r'\nEXPORT_SYMBOL(?:_GPL)?\s*\(\s*' + re.escape(sym) + r'\s*\)\s*;'
+                      if re.search(pat, src):
+                          src = re.sub(pat, "", src)
+                          changed = True
+                          print(f">>> Removed EXPORT_SYMBOL({sym}) from {fp}")
+                  if changed:
+                      open(fp, "w", encoding="utf-8").write(src)
+                      patched.append(fp)
+
+          if patched:
+              print(f">>> Total patched: {len(patched)} files")
+          else:
+              print(">>> No duplicate exports found (clean build)")
+          PYEOF
+          git add -A && git commit -m "fix-duplicate-exports" || true
+
       - name: Konfigurasi Defconfig
         run: |
           cd kernel
