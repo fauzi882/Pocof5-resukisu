@@ -545,7 +545,11 @@ jobs:
               ]
 
           if gps == "true":
-              cfg += ["CONFIG_GNSS=y","CONFIG_GNSS_SERIAL=y","CONFIG_QCOM_GENI_SE=y"]
+              # CONFIG_QCOM_GENI_SE intentionally excluded:
+              # marble vendor tree ships its own msm-geni-se.c which covers all geni_se_* symbols.
+              # enabling the upstream qcom-geni-se.c (CONFIG_QCOM_GENI_SE=y) pulls those same
+              # symbols into vmlinux causing modpost "exported twice" across all vendor i2c/spi/i3c/serial modules.
+              cfg += ["CONFIG_GNSS=y","CONFIG_GNSS_SERIAL=y"]
 
           if dolby == "true":
               cfg += [
@@ -714,41 +718,12 @@ jobs:
 
           # Simbol yang sudah masuk vmlinux via built-in driver,
           # harus dihapus dari vendor module agar modpost tidak protes "exported twice"
-          DUPE_SYMS = [
-              "geni_se_init",
-              "geni_se_clks_on",
-              "geni_se_clks_off",
-              "geni_se_resources_on",
-              "geni_se_resources_off",
-              "geni_se_rx_dma_prep",
-              "geni_se_tx_dma_prep",
-              "geni_se_rx_init_itr_buf",
-              "geni_se_select_mode",
-              "geni_se_config_packing",
-              "geni_se_setup_s_cmd",
-              "geni_se_setup_m_cmd",
-              "geni_se_cancel_m_cmd",
-              "geni_se_cancel_s_cmd",
-              "geni_se_abort_m_cmd",
-              "geni_se_abort_s_cmd",
-              "geni_se_dump_dbg_regs",
-              # clk table symbols
-              "geni_se_clk_tbl_get",
-              "geni_se_clk_freq_match",
-              "geni_se_get_clk_perf_level",
-              "geni_se_set_clk_perf_level",
-              "geni_se_get_num_clk_levels",
-              # iommu / dma
-              "geni_se_iommu_map_buf",
-              "geni_se_iommu_unmap_buf",
-              "geni_se_iommu_map_and_attach",
-              # misc geni_se family
-              "geni_se_remove_earmark_dma",
-              "geni_se_rx_dma_unprep",
-              "geni_se_tx_dma_unprep",
-              "geni_se_common_clk_enable",
-              "geni_se_common_clk_disable",
-          ]
+          # Root cause fixed: CONFIG_QCOM_GENI_SE=y removed from defconfig.
+          # Upstream qcom-geni-se no longer built into vmlinux, so vendor
+          # msm-geni-se.c can export all geni_se_* symbols freely.
+          # List kept empty as safety net — add symbols here only if a NEW
+          # upstream driver conflict surfaces from a different subsystem.
+          DUPE_SYMS = []
 
           patched = []
           for root, dirs, files in os.walk("."):
