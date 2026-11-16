@@ -1,1033 +1,374 @@
-name: Build Marble Kernel (FULL POWER)
+name: Build marble kernel
+
+run-name: marble / ${{ inputs.kernel_ref }} / lto ${{ inputs.lto }}
 
 on:
   workflow_dispatch:
     inputs:
-      ksu_version_override:
-        description: 'Override Versi BakaSU (auto = 35252)'
-        required: false
-        default: 'auto'
+      kernel_ref:
+        description: Kernel branch or 40-hex commit that matches the installed Evolution X build
         type: string
-      enable_susfs:
-        description: 'Integrasikan Patch SuSFS'
         required: true
-        default: 'true'
+        default: bka
+      lto:
+        description: Link-time optimization mode (stock keeps the ROM setting)
         type: choice
-        options:
-          - 'true'
-          - 'false'
-      security_level:
-        description: 'Level Keamanan'
         required: true
-        default: 'maximum_stealth'
-        type: choice
+        default: thin
         options:
-          - maximum_stealth
-          - standard_secure
-      tcp_profile:
-        description: 'Optimasi TCP'
-        required: true
-        default: 'bbr2_tuned'
-        type: choice
-        options:
-          - bbr2_tuned
-          - bbr_plus_tuned
-          - bbr_stock
-      kernel_branch:
-        description: 'Branch Source Kernel'
-        required: true
-        default: 'melt-rebase'
-        type: choice
-        options:
-          - melt-rebase
-          - bouquet
-      cpu_governor:
-        description: 'CPU Governor Default'
-        required: true
-        default: 'schedutil'
-        type: choice
-        options:
-          - schedutil
-          - performance
-          - conservative
-          - pixel
-      enable_dolby:
-        description: 'Enable Dolby Atmos'
-        required: true
-        default: 'true'
-        type: choice
-        options:
-          - 'true'
-          - 'false'
-      enable_gps_fix:
-        description: 'Enable GPS Fix'
-        required: true
-        default: 'true'
-        type: choice
-        options:
-          - 'true'
-          - 'false'
-      enable_signal_boost:
-        description: 'Enable Signal Boost'
-        required: true
-        default: 'true'
-        type: choice
-        options:
-          - 'true'
-          - 'false'
-      enable_integrity_bypass:
-        description: 'Enable Integrity Bypass'
-        required: true
-        default: 'true'
-        type: choice
-        options:
-          - 'true'
-          - 'false'
-      enable_lto:
-        description: 'Enable LTO Thin'
-        required: true
-        default: 'false'
-        type: choice
-        options:
-          - 'false'
-          - 'true'
-      enable_full_security:
-        description: 'Enable ALL Security Features'
-        required: true
-        default: 'true'
-        type: choice
-        options:
-          - 'true'
-          - 'false'
-      enable_ttl_bypass:
-        description: 'Enable TTL Tethering Bypass'
-        required: true
-        default: 'true'
-        type: choice
-        options:
-          - 'true'
-          - 'false'
+          - thin
+          - full
+          - stock
 
-permissions:
-  contents: read
+permissions: {}
 
 env:
-  KERNEL_REPO: "https://github.com/Pzqqt/android_kernel_xiaomi_marble.git"
-  AK3_REPO: "https://github.com/osm0sis/AnyKernel3.git"
-  SUSFS_REPO: "https://gitlab.com/simonpunk/susfs4ksu.git"
-  SUSFS_BRANCH: "gki-android12-5.10"
-  CLANG_URL: "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r536225.tar.gz"
-  ARCH: "arm64"
-  SUBARCH: "arm64"
+  KERNEL_REPO: https://github.com/Evolution-X-Devices/kernel_xiaomi_sm8450
+  KERNEL_CONFIGS: gki_defconfig vendor/waipio_GKI.config vendor/xiaomi_GKI.config vendor/marble_GKI.config vendor/debugfs.config
+  CPUFREQ_SYMBOLS: CPU_FREQ_GOV_PERFORMANCE CPU_FREQ_GOV_POWERSAVE CPU_FREQ_GOV_USERSPACE CPU_FREQ_GOV_ONDEMAND CPU_FREQ_GOV_CONSERVATIVE CPU_FREQ_GOV_SCHEDUTIL
+  NETWORK_SYMBOLS: TCP_CONG_ADVANCED TCP_CONG_CUBIC TCP_CONG_BBR DEFAULT_BBR NET_SCH_FQ NET_SCH_FQ_CODEL
+  DISABLED_SYMBOLS: TCP_CONG_BIC TCP_CONG_WESTWOOD TCP_CONG_HTCP DEFAULT_CUBIC
+  KSU_REPO: https://github.com/pershoot/KernelSU-Next
+  KSU_COMMIT: 4c5853188012f63a1a1fedd4a57fda6375fecb38 # v3.4.0
+  SUSFS_REPO: https://gitlab.com/simonpunk/susfs4ksu.git
+  SUSFS_BRANCH: gki-android12-5.10
+  SUSFS_COMMIT: 9892175b4acec7ee844e113b8d02c0f4d12cdfac # v2.3.0
+  SUSFS_EXCLUDED_SYMBOLS: ""
+  BBG_REPO: https://github.com/vc-teahouse/Baseband-guard
+  BBG_COMMIT: a54e0dc6cf0aff4dd87fec49644a02d2eb612905
+  ANYKERNEL_REPO: https://github.com/osm0sis/AnyKernel3
+  ANYKERNEL_COMMIT: dca9dc370838d919d56c1f59ec78b27a14a72c68
+  CLANG_REPO: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86
+  CLANG_COMMIT: 62cdcefa89e31af2d72c366e8b5ef8db84caea62
+  CLANG_VERSION: r547379 # clang 20.0.0
+  KBUILD_BUILD_USER: builder
+  KBUILD_BUILD_HOST: github-actions
 
 jobs:
-  build-marble-kernel:
-    runs-on: ubuntu-22.04
+  build:
+    name: KernelSU-Next + SUSFS + Baseband Guard
+    runs-on: ubuntu-24.04
     timeout-minutes: 240
-
+    defaults:
+      run:
+        shell: bash
+    env:
+      KERNEL_REF: ${{ inputs.kernel_ref }}
+      LTO_MODE: ${{ inputs.lto }}
+      BUILD_LIB: ${{ github.workspace }}/build-lib.sh
+      KERNEL_DIR: ${{ github.workspace }}/kernel
+      OUT_DIR: ${{ github.workspace }}/out
+      SUSFS_DIR: ${{ github.workspace }}/susfs4ksu
+      ANYKERNEL_DIR: ${{ github.workspace }}/anykernel
+      CLANG_DIR: ${{ github.workspace }}/clang
+      PACKAGE_DIR: ${{ github.workspace }}/package
+      STOCK_CONFIG: ${{ github.workspace }}/stock.config
     steps:
-      - name: Maksimalkan Ruang Disk
+      - name: Write build helpers
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
-          sudo docker image prune --all --force || true
-          df -h
+          cat > "$BUILD_LIB" <<'EOF'
+          fail() {
+            echo "::error::$1"
+            exit 1
+          }
 
-      - name: Install Dependensi
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y \
-            bc bison build-essential ccache cpio curl flex git git-lfs \
-            libelf-dev libncurses5-dev libssl-dev lld llvm lz4 pahole \
-            python3 python3-pip rsync unzip wget xz-utils zip zstd \
-            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
-            binutils-aarch64-linux-gnu libdw-dev libunwind-dev \
-            libaudit-dev libslang2-dev pkg-config libcap-dev libseccomp-dev
+          kernel_make() {
+            make -C "$KERNEL_DIR" O="$OUT_DIR" ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_COMPAT=arm-linux-gnueabi- CLANG_TRIPLE=aarch64-linux-gnu- "$@"
+          }
+          EOF
 
-      - name: Setup Toolchain Clang
+      - name: Validate inputs and pins
         run: |
-          mkdir -p "$HOME/toolchains/clang"
-          CLANG_OK=false
-          wget -q --timeout=120 --tries=2 -O /tmp/clang.tar.gz "${{ env.CLANG_URL }}" 2>/dev/null && \
-            tar -xzf /tmp/clang.tar.gz -C "$HOME/toolchains/clang" 2>/dev/null && \
-            CLANG_OK=true || true
-          rm -f /tmp/clang.tar.gz
-          if [ "$CLANG_OK" = "false" ]; then
-            ZYC="https://github.com/ZyCromerZ/Clang/releases/download/18.0.0git-20240302-release/Clang-18.0.0git-20240302.tar.gz"
-            wget -q --timeout=180 --tries=2 -O /tmp/clang.tar.gz "$ZYC" 2>/dev/null && \
-              tar -xzf /tmp/clang.tar.gz -C "$HOME/toolchains/clang" 2>/dev/null && \
-              CLANG_OK=true || true
-            rm -f /tmp/clang.tar.gz
-          fi
-          if [ "$CLANG_OK" = "false" ]; then
-            wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
-              | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
-            echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-17 main" \
-              | sudo tee /etc/apt/sources.list.d/llvm.list >/dev/null
-            sudo apt-get update -qq && sudo apt-get install -y clang-17 lld-17 llvm-17
-            mkdir -p "$HOME/toolchains/clang/bin"
-            for t in clang clang++ ld.lld llvm-ar llvm-nm llvm-objcopy llvm-objdump llvm-strip; do
-              command -v "${t}-17" >/dev/null 2>&1 && \
-                ln -sf "$(command -v ${t}-17)" "$HOME/toolchains/clang/bin/${t}" || true
-            done
-          fi
-          echo "$HOME/toolchains/clang/bin" >> $GITHUB_PATH
-          clang --version || true
+          source "$BUILD_LIB"
 
-      - name: Clone Kernel Source
-        run: |
-          git clone --depth=1 -b "${{ github.event.inputs.kernel_branch }}" \
-            "${{ env.KERNEL_REPO }}" kernel
-          cd kernel
-          git config user.name "build-user"
-          git config user.email "build-user@android"
+          require_match() {
+            [[ "${!1}" =~ $2 ]] || fail "$1 does not match $2"
+          }
 
-      - name: Clone SuSFS
-        if: ${{ github.event.inputs.enable_susfs == 'true' }}
-        run: |
-          git clone --depth=1 -b "${{ env.SUSFS_BRANCH }}" "${{ env.SUSFS_REPO }}" susfs4ksu
-
-      - name: Integrasi BakaSU
-        run: |
-          cd kernel
-          rm -rf KernelSU drivers/kernelsu
-          sed -i '/kernelsu/d' drivers/Makefile drivers/Kconfig 2>/dev/null || true
-          git add -A && git commit -m "clean-pre-root" || true
-          curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash -s main \
-            || curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash
-          [ -d "KernelSU" ] || [ -d "drivers/kernelsu" ] || { echo "ERROR: BakaSU gagal"; exit 1; }
-          if [ -d "KernelSU" ]; then
-            cd KernelSU
-            git config user.name "build-user" && git config user.email "build-user@android"
-            git fetch --all --tags || true
-            REF=$(git for-each-ref --sort=-committerdate --format="%(refname:short)" refs/remotes/origin/ | head -1)
-            [ -n "$REF" ] && git checkout -f "$REF" || true
-            cd ..
-          fi
-          git add -A && git commit -m "bakasu-integrated" || true
-
-      - name: Sinkronisasi Versi BakaSU
-        run: |
-          cd kernel
-          VER="${{ github.event.inputs.ksu_version_override }}"
-          [ "$VER" = "auto" ] || [ -z "$VER" ] && VER="35252"
-          for d in KernelSU drivers/kernelsu; do
-            [ -d "$d" ] || continue
-            find "$d" -maxdepth 3 \( -name "Makefile" -o -name "Kbuild" -o -name "*.mk" \) | while read f; do
-              sed -i "s/KSU_VERSION := .*/KSU_VERSION := ${VER}/g" "$f" || true
-              sed -i "s/^VERSION = .*/VERSION = ${VER}/g" "$f" || true
-              sed -i "s/-dirty//g" "$f" || true
-            done
+          require_match KERNEL_REF '^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$'
+          require_match LTO_MODE '^(thin|full|stock)$'
+          require_match CLANG_VERSION '^r[0-9]+[a-z0-9]*$'
+          for pin in KSU_COMMIT SUSFS_COMMIT BBG_COMMIT ANYKERNEL_COMMIT CLANG_COMMIT; do
+            require_match "$pin" '^[0-9a-f]{40}$'
           done
-          git add -A && git commit -m "version-sync" || true
 
-      - name: Integrasi SuSFS
-        if: ${{ github.event.inputs.enable_susfs == 'true' }}
+      - name: Free disk space and add swap
         run: |
-          cd kernel
-          SUSFS_OK=false
-          [ -d "../susfs4ksu" ] || { echo "SUSFS_APPLIED=false" >> $GITHUB_ENV; exit 0; }
-          cp -rv ../susfs4ksu/kernel_patches/fs/* fs/ 2>/dev/null || true
-          cp -rv ../susfs4ksu/kernel_patches/include/linux/* include/linux/ 2>/dev/null || true
-          PF="../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android12-5.10.patch"
-          if [ -f "$PF" ]; then
-            if   patch -p1 --dry-run          < "$PF" >/dev/null 2>&1; then patch -p1 --forward          < "$PF" && SUSFS_OK=true
-            elif patch -p1 --dry-run --fuzz=1 < "$PF" >/dev/null 2>&1; then patch -p1 --forward --fuzz=1 < "$PF" && SUSFS_OK=true
-            elif git apply --3way --check "$PF" >/dev/null 2>&1;         then git apply --3way "$PF"     && SUSFS_OK=true
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift
+          sudo fallocate -l 8G /mnt/build.swap
+          sudo chmod 600 /mnt/build.swap
+          sudo mkswap /mnt/build.swap
+          sudo swapon /mnt/build.swap
+          df -h "$GITHUB_WORKSPACE"
+          free -h
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bc binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi bison build-essential ca-certificates cpio curl dwarves flex git jq kmod libelf-dev libssl-dev lz4 patch python3 zip zstd
+
+      - name: Fetch Android Clang
+        run: |
+          source "$BUILD_LIB"
+
+          archive="$RUNNER_TEMP/clang.tar.gz"
+          curl -fsSL --retry 5 --retry-delay 10 -o "$archive" "$CLANG_REPO/+archive/$CLANG_COMMIT/clang-$CLANG_VERSION.tar.gz"
+          mkdir -p "$CLANG_DIR"
+          tar -xzf "$archive" -C "$CLANG_DIR"
+          rm "$archive"
+
+          [[ -x "$CLANG_DIR/bin/clang" ]] || fail "clang-$CLANG_VERSION is missing at $CLANG_COMMIT"
+          clang_banner=$("$CLANG_DIR/bin/clang" --version)
+          clang_banner=${clang_banner%%$'\n'*}
+          [[ "$clang_banner" == *"$CLANG_VERSION"* ]] || fail "Unexpected toolchain: $clang_banner"
+
+          echo "$CLANG_DIR/bin" >> "$GITHUB_PATH"
+          echo "CLANG_BANNER=$clang_banner" >> "$GITHUB_ENV"
+
+      - name: Fetch sources
+        run: |
+          source "$BUILD_LIB"
+
+          fetch_source() {
+            local repository=$1 ref=$2 directory=$3
+            shift 3
+            git init -q "$directory"
+            git -C "$directory" remote add origin "$repository"
+            git -C "$directory" fetch -q "$@" origin "$ref"
+            git -C "$directory" checkout -q --detach FETCH_HEAD
+          }
+
+          fetch_source "$KERNEL_REPO" "$KERNEL_REF" "$KERNEL_DIR" --depth 1
+          [[ ! -e "$KERNEL_DIR/drivers/kernelsu" && ! -e "$KERNEL_DIR/KernelSU-Next" ]] || fail "$KERNEL_REF already carries KernelSU; pick a ref without it"
+
+          fetch_source "$KSU_REPO" "$KSU_COMMIT" "$KERNEL_DIR/KernelSU-Next" --tags
+          fetch_source "$SUSFS_REPO" "$SUSFS_BRANCH" "$SUSFS_DIR"
+          git -C "$SUSFS_DIR" checkout -q --detach "$SUSFS_COMMIT" || fail "SUSFS_COMMIT is not on $SUSFS_BRANCH"
+          fetch_source "$BBG_REPO" "$BBG_COMMIT" "$KERNEL_DIR/Baseband-guard" --depth 1
+          fetch_source "$ANYKERNEL_REPO" "$ANYKERNEL_COMMIT" "$ANYKERNEL_DIR" --depth 1
+
+          echo "KERNEL_COMMIT=$(git -C "$KERNEL_DIR" rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Generate stock config
+        run: |
+          source "$BUILD_LIB"
+
+          read -ra kernel_configs <<< "$KERNEL_CONFIGS"
+          for config in "${kernel_configs[@]}"; do
+            [[ -f "$KERNEL_DIR/arch/arm64/configs/$config" ]] || fail "arch/arm64/configs/$config is missing in $KERNEL_REF"
+          done
+
+          kernel_make "${kernel_configs[@]}"
+          cp "$OUT_DIR/.config" "$STOCK_CONFIG"
+
+      - name: Integrate KernelSU-Next
+        run: |
+          source "$BUILD_LIB"
+
+          grep -rqs --include='Kconfig*' '^config KSU_SUSFS[[:space:]]*$' "$KERNEL_DIR/KernelSU-Next/kernel" || fail "KSU_COMMIT carries no SUSFS support"
+
+          ln -s ../KernelSU-Next/kernel "$KERNEL_DIR/drivers/kernelsu"
+          printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> "$KERNEL_DIR/drivers/Makefile"
+          sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' "$KERNEL_DIR/drivers/Kconfig"
+
+      - name: Integrate SUSFS
+        run: |
+          source "$BUILD_LIB"
+
+          patches="$SUSFS_DIR/kernel_patches"
+          cp "$patches"/fs/* "$KERNEL_DIR/fs/"
+          cp "$patches"/include/linux/* "$KERNEL_DIR/include/linux/"
+
+          patch_log="$RUNNER_TEMP/susfs-patch.log"
+          if ! patch -d "$KERNEL_DIR" -p1 --forward --no-backup-if-mismatch < "$patches/50_add_susfs_in_$SUSFS_BRANCH.patch" | tee "$patch_log"; then
+            find "$KERNEL_DIR" -name '*.rej'
+            fail "SUSFS patch does not apply to $KERNEL_REF"
+          fi
+          fuzzy_hunks=$(grep -c 'with fuzz' "$patch_log" || true)
+          (( fuzzy_hunks == 0 )) || echo "::warning::SUSFS patch applied $fuzzy_hunks hunks with fuzz; review this step log before flashing"
+
+          susfs_version=$(sed -n 's/^#define SUSFS_VERSION "\(.*\)"$/\1/p' "$KERNEL_DIR/include/linux/susfs.h")
+          echo "SUSFS_VERSION=${susfs_version:-unknown}" >> "$GITHUB_ENV"
+
+      - name: Integrate Baseband Guard
+        run: |
+          source "$BUILD_LIB"
+
+          security="$KERNEL_DIR/security"
+          grep -qF '#define DEFINE_LSM(lsm)' "$KERNEL_DIR/include/linux/lsm_hooks.h" || fail "Kernel predates DEFINE_LSM; Baseband Guard needs its SELinux patch"
+
+          ln -s ../Baseband-guard "$security/baseband-guard"
+          printf '\nobj-$(CONFIG_BBG) += baseband-guard/\n' >> "$security/Makefile"
+          last_endmenu=$(grep -n '^endmenu' "$security/Kconfig" | tail -n 1 | cut -d: -f1)
+          sed -i "${last_endmenu}i source \"security/baseband-guard/Kconfig\"" "$security/Kconfig"
+
+      - name: Commit integrated tree
+        run: |
+          source_epoch=$(git -C "$KERNEL_DIR" log -1 --format=%ct)
+          export GIT_AUTHOR_DATE="$source_epoch +0000" GIT_COMMITTER_DATE="$source_epoch +0000"
+          git -C "$KERNEL_DIR" -c user.name=builder -c user.email=builder@localhost commit -q -a -m "Integrate KernelSU-Next, SUSFS and Baseband Guard"
+          echo "KBUILD_BUILD_TIMESTAMP=$(LC_ALL=C date -u -d "@$source_epoch")" >> "$GITHUB_ENV"
+
+      - name: Configure kernel
+        run: |
+          source "$BUILD_LIB"
+
+          require_enabled() {
+            grep -qx "CONFIG_$1=y" "$OUT_DIR/.config" || fail "CONFIG_$1 is not enabled in the final config"
+          }
+
+          mapfile -t susfs_symbols < <(find "$KERNEL_DIR/KernelSU-Next/kernel" -name 'Kconfig*' -exec awk '/^config / { symbol = ($2 ~ /^KSU_SUSFS/) ? $2 : ""; next } symbol && /^[[:space:]]+bool/ { print symbol; symbol = "" }' {} +)
+          (( ${#susfs_symbols[@]} )) || fail "No KSU_SUSFS symbols found in the KernelSU-Next Kconfig"
+
+          stock_lsm=$(sed -n 's/^CONFIG_LSM="\(.*\)"$/\1/p' "$STOCK_CONFIG")
+          [[ -n "$stock_lsm" ]] || fail "CONFIG_LSM is missing in the stock config"
+          lsm=${stock_lsm/selinux/selinux,baseband_guard}
+          [[ "$lsm" == *baseband_guard* ]] || lsm="$stock_lsm,baseband_guard"
+
+          options=(--enable KSU --disable KSU_DEBUG --enable BBG --set-str LSM "$lsm")
+          enabled_symbols=(KSU BBG)
+          for symbol in "${susfs_symbols[@]}"; do
+            if [[ " $SUSFS_EXCLUDED_SYMBOLS " == *" $symbol "* ]]; then
+              options+=(--disable "$symbol")
+              continue
             fi
-          fi
-          [ "$SUSFS_OK" = "true" ] && git add -A && git commit -m "susfs-applied" || true
-          echo "SUSFS_APPLIED=$SUSFS_OK" >> $GITHUB_ENV
+            options+=(--enable "$symbol")
+            enabled_symbols+=("$symbol")
+          done
 
-      # FIX: Script ditulis SEBELUM step manapun yang menjalankan /tmp/*.py
-      - name: Tulis Script Patches
+          read -ra tuning_symbols <<< "$CPUFREQ_SYMBOLS $NETWORK_SYMBOLS"
+          read -ra disabled_symbols <<< "$DISABLED_SYMBOLS"
+          for symbol in "${tuning_symbols[@]}"; do
+            options+=(--enable "$symbol")
+            enabled_symbols+=("$symbol")
+          done
+          for symbol in "${disabled_symbols[@]}"; do
+            options+=(--disable "$symbol")
+          done
+
+          case "$LTO_MODE" in
+            thin) options+=(--enable LTO_CLANG --disable LTO_NONE --enable LTO_CLANG_THIN --disable LTO_CLANG_FULL --enable THINLTO) ;;
+            full) options+=(--enable LTO_CLANG --disable LTO_NONE --disable LTO_CLANG_THIN --enable LTO_CLANG_FULL --disable THINLTO) ;;
+          esac
+
+          "$KERNEL_DIR/scripts/config" --file "$OUT_DIR/.config" "${options[@]}"
+          kernel_make olddefconfig
+
+          for symbol in "${enabled_symbols[@]}"; do
+            require_enabled "$symbol"
+          done
+          for symbol in "${disabled_symbols[@]}"; do
+            ! grep -qE "^CONFIG_$symbol=[ym]$" "$OUT_DIR/.config" || fail "CONFIG_$symbol must stay disabled in the final config"
+          done
+          grep -q '^CONFIG_LSM=".*baseband_guard' "$OUT_DIR/.config" || fail "baseband_guard is missing in CONFIG_LSM"
+
+          echo "ENABLED_FEATURES=${enabled_symbols[*]}" >> "$GITHUB_ENV"
+
+      - name: Verify hardening against the stock config
         run: |
-          cat > /tmp/clean_externs.py << 'PYEOF'
-          import re, os, sys
-          KSU_FUNCS = {"ksu_setup_preinit_file": "void", "ksu_preinit_handle_post_execveat": "int"}
-          BAD = ["Safe weak stubs","True SELinux passthrough","execveat preinit","KSU forward declarations (auto-generated)"]
-          SEFILES = ["security/selinux/hooks.c","security/selinux/selinuxfs.c"]
-          def find_sig(fn):
-              dr = re.compile(r'(?:^|\n)[ \t]*(void|int|long)\s*\*?\s*'+re.escape(fn)+r'\s*\(([^)]+)\)\s*(?:\{|$)',re.M)
-              for root,dirs,files in os.walk("."):
-                  dirs[:] = [d for d in dirs if d not in [".git","out"]]
-                  for f in files:
-                      if not f.endswith((".c",".h")): continue
-                      fp = os.path.join(root,f)
-                      if os.path.abspath(fp)==os.path.abspath("fs/exec.c"): continue
-                      try: src=open(fp,encoding="utf-8",errors="ignore").read()
-                      except: continue
-                      m=dr.search(src)
-                      if m: return (m.group(1),m.group(2),fp)
-              return None
-          if os.path.isfile("fs/exec.c"):
-              with open("fs/exec.c",encoding="utf-8",errors="replace") as f: raw=f.read()
-              lines=raw.splitlines(keepends=True); out=[]; i=0
-              while i<len(lines):
-                  ln=lines[i]
-                  if any(b in ln for b in BAD): i+=1; continue
-                  if re.search(r'(__attribute__\s*\(\s*\(weak\)\s*\)|__weak)\s[\w\s\*]*ksu_',ln):
-                      if "{" in ln:
-                          d=ln.count("{")-ln.count("}"); i+=1
-                          while i<len(lines) and d>0: d+=lines[i].count("{")-lines[i].count("}"); i+=1
-                      else: i+=1
-                      continue
-                  bad=any(fn in ln and re.search(r'\b(extern|static)\b',ln) for fn in KSU_FUNCS)
-                  if bad:
-                      if ";" in ln or ("{" in ln and "}" in ln): i+=1
-                      elif "{" in ln:
-                          d=ln.count("{")-ln.count("}"); i+=1
-                          while i<len(lines) and d>0: d+=lines[i].count("{")-lines[i].count("}"); i+=1
-                      else:
-                          i+=1
-                          while i<len(lines) and ";" not in lines[i]: i+=1
-                          i+=1
-                      continue
-                  out.append(ln); i+=1
-              content="".join(out)
-              injs=[]
-              for fn,rd in KSU_FUNCS.items():
-                  if not re.search(r'\b'+fn+r'\s*\(',content): continue
-                  r=find_sig(fn)
-                  injs.append(f"extern {r[0] if r else rd} {fn}({r[1] if r else ''});"+"\n")
-              if injs:
-                  ls=content.split("\n"); li=max((i for i,l in enumerate(ls) if l.strip().startswith("#include")),default=-1)
-                  if li>=0: ls.insert(li+1,"\n/* KSU decls */\n"+"".join(injs)); content="\n".join(ls)
-              open("fs/exec.c","w",encoding="utf-8").write(content)
-              print("exec.c patched")
-          for sf in SEFILES:
-              if not os.path.isfile(sf): continue
-              src=open(sf,encoding="utf-8",errors="replace").read()
-              for b in BAD: src=re.sub(r'/\*[^*]*'+re.escape(b)+r'[^*]*\*/',"",src)
-              open(sf,"w",encoding="utf-8").write(src); print(f"{sf} cleaned")
-          PYEOF
+          source "$BUILD_LIB"
 
-          cat > /tmp/patch_integrity.py << 'PYEOF'
-          import re, os, sys
-          bypass = sys.argv[1] if len(sys.argv)>1 else "true"
-          if bypass != "true": sys.exit(0)
-          f = "fs/proc/cmdline.c"
-          if os.path.isfile(f):
-              src = open(f, encoding="utf-8", errors="replace").read()
-              spoof = """
-          static char *spoof_cmdline(const char *o){
-              static char b[4096]; char *p;
-              strncpy(b,o,sizeof(b)-1); b[sizeof(b)-1]=0;
-              p=strstr(b,"androidboot.verifiedbootstate=orange");
-              if(p) memcpy(p,"androidboot.verifiedbootstate=green ",36);
-              p=strstr(b,"androidboot.vbmeta.device_state=unlocked");
-              if(p) memcpy(p+31,"locked  ",8);
-              return b; }
-          """
-              if "spoof_cmdline" not in src:
-                  ls=src.split("\n"); li=max((i for i,l in enumerate(ls) if l.strip().startswith("#include")),default=0)
-                  ls.insert(li+1, spoof); src="\n".join(ls)
-              src=re.sub(r'seq_puts\(m,\s*saved_command_line\)','seq_puts(m, spoof_cmdline(saved_command_line))',src)
-              open(f,"w",encoding="utf-8").write(src); print(f"{f}: spoofed")
-          f = "drivers/md/dm-verity-target.c"
-          if os.path.isfile(f):
-              src = open(f, encoding="utf-8", errors="replace").read()
-              import re as _re
-              src = _re.sub(
-                  r'(static\s+int\s+verity_verify_io\s*\([^)]*\)\s*\{)',
-                  r'\1\n\treturn 0; /* bypass */',
-                  src
-              )
-              src = _re.sub(
-                  r'(static\s+void\s+verity_end_io\s*\([^)]*\)\s*\{)',
-                  r'\1\n\tbio->bi_status = BLK_STS_OK; /* bypass */',
-                  src
-              )
-              open(f,"w",encoding="utf-8").write(src); print(f"{f}: verity bypassed")
-          f = "security/lockdown/lockdown.c"
-          if os.path.isfile(f):
-              src = open(f, encoding="utf-8", errors="replace").read()
-              src = re.sub(r'(static\s+int\s+lockdown_is_locked_down\s*\([^)]*\)\s*\{)',
-                  r'\1\n\treturn 0; /* bypass */', src)
-              open(f,"w",encoding="utf-8").write(src); print(f"{f}: lockdown bypassed")
-          for f in ["drivers/firmware/qcom/qcom_scm.c","drivers/firmware/qcom_scm.c"]:
-              if not os.path.isfile(f): continue
-              src = open(f, encoding="utf-8", errors="replace").read()
-              src = re.sub(r'(int\s+qcom_scm_is_secure_boot_enabled\s*\([^)]*\)\s*\{)',
-                  r'\1\n\treturn 0; /* bypass */', src)
-              open(f,"w",encoding="utf-8").write(src); print(f"{f}: scm bypassed")
-          PYEOF
-
-          cat > /tmp/patch_bbr2.py << 'PYEOF'
-          import os, sys, re
-          profile = sys.argv[1] if len(sys.argv)>1 else "bbr2_tuned"
-
-          if profile == "bbr2_tuned" and os.path.isfile("net/ipv4/tcp_bbr.c"):
-              src = open("net/ipv4/tcp_bbr.c", encoding="utf-8").read()
-              if "bbr2" not in src:
-                  bbr1_struct = re.search(
-                      r'static\s+struct\s+tcp_congestion_ops\s+tcp_bbr_cong_ops\s*[^=]*=\s*\{([^}]+)\}',
-                      src, re.DOTALL
-                  )
-                  if bbr1_struct:
-                      fields_raw = bbr1_struct.group(1)
-                      fields_bbr2 = re.sub(r'(\.name\s*=\s*)"bbr"', r'\1"bbr2"', fields_raw)
-                      bbr2_addon = f"""
-          /* BBR2 alias - same as BBR1 with different name */
-          static struct tcp_congestion_ops tcp_bbr2_ops __read_mostly = {{{fields_bbr2}}};
-          """
-                  else:
-                      bbr2_addon = """
-          /* BBR2 alias - minimal safe definition */
-          static struct tcp_congestion_ops tcp_bbr2_ops __read_mostly = {
-              .flags        = TCP_CONG_NON_RESTRICTED,
-              .name         = "bbr2",
-              .owner        = THIS_MODULE,
-              .init         = bbr_init,
-              .cong_control = bbr_main,
-              .undo_cwnd    = bbr_undo_cwnd,
-              .cwnd_event   = bbr_cwnd_event,
-              .ssthresh     = bbr_ssthresh,
-              .get_info     = bbr_get_info,
-              .set_state    = bbr_set_state,
-          };
-          """
-                  src = re.sub(r'(static\s+int\s+__init\s+bbr_register)', bbr2_addon + r'\1', src)
-                  src = re.sub(
-                      r'(return\s+tcp_register_congestion_control\s*\(&tcp_bbr_cong_ops\s*\)\s*;)',
-                      r'tcp_register_congestion_control(&tcp_bbr2_ops);\n\t\1', src
-                  )
-                  src = re.sub(
-                      r'(tcp_unregister_congestion_control\s*\(&tcp_bbr_cong_ops\s*\)\s*;)',
-                      r'\1\n\ttcp_unregister_congestion_control(&tcp_bbr2_ops);', src
-                  )
-                  open("net/ipv4/tcp_bbr.c", "w", encoding="utf-8").write(src)
-                  print(">>> BBR2 alias added to tcp_bbr.c")
-              else:
-                  print(">>> BBR2 already present in tcp_bbr.c")
-
-          if os.path.isfile("net/ipv4/tcp_bbr.c"):
-              src = open("net/ipv4/tcp_bbr.c", encoding="utf-8").read()
-              src = src.replace("bbr_min_rtt_win_sec = 10", "bbr_min_rtt_win_sec = 5")
-              src = src.replace("bbr_probe_rtt_mode_ms = 200", "bbr_probe_rtt_mode_ms = 100")
-              open("net/ipv4/tcp_bbr.c", "w", encoding="utf-8").write(src)
-              print(">>> BBR params tuned")
-          PYEOF
-
-          cat > /tmp/gen_defconfig.py << 'PYEOF'
-          import sys
-          defconfig    = sys.argv[1]
-          susfs_ok     = sys.argv[2]
-          sec_level    = sys.argv[3]
-          tcp_profile  = sys.argv[4]
-          cpu_gov      = sys.argv[5]
-          enable_lto   = sys.argv[6]
-          full_sec     = sys.argv[7]
-          bypass       = sys.argv[8]
-          dolby        = sys.argv[9]
-          gps          = sys.argv[10]
-          ttl_bypass   = sys.argv[11] if len(sys.argv) > 11 else "true"
-
-          cfg = [
-              # KSU
-              "CONFIG_WERROR=n","CONFIG_KSU=y","CONFIG_KPROBES=y",
-              "CONFIG_HAVE_KPROBES=y","CONFIG_KPROBE_EVENTS=y",
-              # TCP/BBR
-              "CONFIG_TCP_CONG_ADVANCED=y","CONFIG_TCP_CONG_BBR=y",
-              "CONFIG_TCP_CONG_CUBIC=y","CONFIG_TCP_CONG_RENO=y",
-              'CONFIG_DEFAULT_TCP_CONG="bbr"',
-              "CONFIG_NET_SCH_FQ=y","CONFIG_NET_SCH_FQ_CODEL=y",
-              "CONFIG_NET_SCH_CAKE=y","CONFIG_SYN_COOKIES=y",
-              # CPU Governors
-              "CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y","CONFIG_CPU_FREQ_GOV_PERFORMANCE=y",
-              "CONFIG_CPU_FREQ_GOV_POWERSAVE=y","CONFIG_CPU_FREQ_GOV_CONSERVATIVE=y",
-              "CONFIG_CPU_FREQ_GOV_USERSPACE=y","CONFIG_CPU_FREQ_STAT=y",
-              # Scheduler
-              "CONFIG_CFS_BANDWIDTH=y","CONFIG_RT_GROUP_SCHED=y",
-              "CONFIG_SCHED_AUTOGROUP=y","CONFIG_PREEMPT=y","CONFIG_HZ_300=y",
-              # Memory + IO
-              "CONFIG_ZSMALLOC=y","CONFIG_ZRAM=y","CONFIG_ZRAM_DEF_COMP_LZ4=y",
-              "CONFIG_TRANSPARENT_HUGEPAGE=y","CONFIG_TRANSPARENT_HUGEPAGE_MADVISE=y",
-              "CONFIG_ZSWAP=y","CONFIG_KSM=y","CONFIG_COMPACTION=y",
-              "CONFIG_MQ_IOSCHED_DEADLINE=y","CONFIG_MQ_IOSCHED_KYBER=y",
-              "CONFIG_IOSCHED_BFQ=y","CONFIG_BFQ_GROUP_IOSCHED=y",
-              # Security base
-              "CONFIG_SECURITY=y","CONFIG_SECURITY_DMESG_RESTRICT=y",
-              "CONFIG_SECURITY_SELINUX=y","CONFIG_SECURITY_SELINUX_DEVELOP=y",
-              "CONFIG_SECURITY_SELINUX_BOOTPARAM=y",
-              "CONFIG_SECURITY_SELINUX_BOOTPARAM_VALUE=1",
-              "CONFIG_DEFAULT_SECURITY_SELINUX=y",
-              "CONFIG_BPF=y","CONFIG_BPF_SYSCALL=y","CONFIG_BPF_JIT=y",
-              "CONFIG_BPF_JIT_ALWAYS_ON=y","CONFIG_SECCOMP=y","CONFIG_SECCOMP_FILTER=y",
-          ]
-
-          gov_map = {
-              "schedutil":"CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y",
-              "performance":"CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y",
-              "conservative":"CONFIG_CPU_FREQ_DEFAULT_GOV_CONSERVATIVE=y",
-              "pixel":"CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y",
+          config_state() {
+            grep -E "^(# )?CONFIG_$2[ =]" "$1" || true
           }
-          cfg.append(gov_map.get(cpu_gov,"CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y"))
 
-          if enable_lto == "true":
-              cfg += ["CONFIG_LTO=y","CONFIG_LTO_CLANG=y","CONFIG_THINLTO=y","CONFIG_LTO_CLANG_THIN=y"]
-
-          if bypass == "true":
-              cfg += [
-                  "# CONFIG_SECURITY_LOCKDOWN_LSM is not set",
-                  "CONFIG_DEVMEM=y","# CONFIG_STRICT_DEVMEM is not set",
-                  "# CONFIG_MODULE_SIG is not set","# CONFIG_MODULE_SIG_FORCE is not set",
-                  "# CONFIG_DM_VERITY_VERIFY_ROOTHASH_SIG is not set",
-              ]
-
-          if full_sec == "true":
-              cfg += [
-                  # T1: Memory hardening
-                  "CONFIG_INIT_ON_ALLOC_DEFAULT_ON=y","CONFIG_INIT_ON_FREE_DEFAULT_ON=y",
-                  "CONFIG_SLAB_FREELIST_RANDOM=y","CONFIG_SLAB_FREELIST_HARDENED=y",
-                  "CONFIG_SHUFFLE_PAGE_ALLOCATOR=y","CONFIG_FORTIFY_SOURCE=y",
-                  "CONFIG_HARDENED_USERCOPY=y","CONFIG_KFENCE=y",
-                  "CONFIG_VMAP_STACK=y","CONFIG_THREAD_INFO_IN_TASK=y",
-                  "CONFIG_REFCOUNT_FULL=y","CONFIG_PAGE_POISONING=y",
-                  # T2: Code hardening
-                  "CONFIG_STACKPROTECTOR=y","CONFIG_STACKPROTECTOR_STRONG=y",
-                  "CONFIG_STRICT_KERNEL_RWX=y","CONFIG_STRICT_MODULE_RWX=y",
-                  "CONFIG_RANDOMIZE_BASE=y","CONFIG_RANDOMIZE_MODULE_REGION_FULL=y",
-                  "CONFIG_LATENT_ENTROPY=y","CONFIG_GCC_PLUGIN_LATENT_ENTROPY=y",
-                  "CONFIG_GCC_PLUGIN_STRUCTLEAK=y","CONFIG_GCC_PLUGIN_STRUCTLEAK_BYREF_ALL=y",
-                  "CONFIG_GCC_PLUGIN_STACKLEAK=y","CONFIG_GCC_PLUGIN_RANDSTRUCT=y",
-                  # T3: ARM64 PAC + BTI + CFI + KPTI + MTE
-                  "CONFIG_ARM64_PTR_AUTH=y","CONFIG_ARM64_PTR_AUTH_KERNEL=y",
-                  "CONFIG_ARM64_BTI=y","CONFIG_ARM64_BTI_KERNEL=y",
-                  "CONFIG_ARM64_MTE=y","CONFIG_SHADOW_CALL_STACK=y",
-                  "CONFIG_ARM64_SW_TTBR0_PAN=y","CONFIG_ARM64_PAN=y",
-                  "CONFIG_UNMAP_KERNEL_AT_EL0=y","CONFIG_HARDEN_BRANCH_PREDICTOR=y",
-                  "CONFIG_MITIGATE_SPECTRE_BRANCH_HISTORY=y",
-                  "CONFIG_CFI_CLANG=y","CONFIG_CFI_PERMISSIVE=n",
-                  # T4: Network Security + WireGuard
-                  "CONFIG_NETFILTER=y","CONFIG_NF_CONNTRACK=y","CONFIG_NF_TABLES=y",
-                  "CONFIG_NETFILTER_ADVANCED=y","CONFIG_XFRM=y","CONFIG_XFRM_USER=y",
-                  "CONFIG_INET_ESP=y","CONFIG_INET_AH=y","CONFIG_WIREGUARD=y",
-                  "CONFIG_IP_NF_IPTABLES=y","CONFIG_IP_NF_FILTER=y",
-                  "CONFIG_IP6_NF_IPTABLES=y","CONFIG_IP6_NF_FILTER=y",
-                  # TTL manipulation - tethering bypass
-                  "CONFIG_NETFILTER_XT_TARGET_TTL=y",
-                  "CONFIG_IP6_NF_TARGET_HL=y",
-                  "CONFIG_NETFILTER_XT_MATCH_TTL=y",
-                  # T5: eBPF + BPF LSM
-                  "CONFIG_BPF_EVENTS=y","CONFIG_BPF_LSM=y","CONFIG_SECURITY_BPFLSM=y",
-                  "CONFIG_BPF_STREAM_PARSER=y",
-                  # T6: ARM64 Crypto Hardware
-                  "CONFIG_CRYPTO_AES=y","CONFIG_CRYPTO_AES_ARM64_CE=y",
-                  "CONFIG_CRYPTO_CHACHA20POLY1305=y","CONFIG_CRYPTO_SHA256_ARM64=y",
-                  "CONFIG_CRYPTO_SHA3_ARM64=y","CONFIG_CRYPTO_BLAKE2S=y",
-                  "CONFIG_CRYPTO_GCM=y","CONFIG_CRYPTO_DRBG=y",
-                  "CONFIG_CRYPTO_DRBG_HMAC=y","CONFIG_CRYPTO_JITTERENTROPY=y",
-                  "CONFIG_HW_RANDOM=y","CONFIG_HW_RANDOM_QCOM=y",
-                  "# CONFIG_CRYPTO_MD5 is not set",
-                  "# CONFIG_CRYPTO_DES is not set","# CONFIG_CRYPTO_RC4 is not set",
-                  # T7: Audit + IMA
-                  "CONFIG_AUDIT=y","CONFIG_AUDITSYSCALL=y","CONFIG_AUDIT_WATCH=y",
-                  "CONFIG_INTEGRITY=y","CONFIG_IMA=y","CONFIG_IMA_APPRAISE=y",
-                  "CONFIG_EVM=y",
-                  # T8: Namespaces + cgroups
-                  "CONFIG_SECURITY_YAMA=y","CONFIG_NAMESPACES=y",
-                  "CONFIG_USER_NS=y","CONFIG_PID_NS=y","CONFIG_NET_NS=y",
-                  "CONFIG_CGROUPS=y","CONFIG_CGROUP_BPF=y","CONFIG_MEMCG=y",
-                  "CONFIG_BLK_CGROUP=y","CONFIG_CPUSETS=y",
-                  # Android-specific
-                  "CONFIG_ANDROID_PARANOID_NETWORK=y","CONFIG_ANDROID_BINDER_IPC=y",
-                  "CONFIG_TRUSTED_KEYS=y","CONFIG_ENCRYPTED_KEYS=y",
-                  "CONFIG_FS_ENCRYPTION=y","CONFIG_FS_VERITY=y",
-                  "CONFIG_DM_CRYPT=y","CONFIG_DM_INTEGRITY=y","CONFIG_DM_VERITY=y",
-              ]
-          elif ttl_bypass == "true":
-              # TTL configs tanpa full_sec
-              cfg += [
-                  "CONFIG_NETFILTER=y","CONFIG_IP_NF_IPTABLES=y","CONFIG_IP6_NF_IPTABLES=y",
-                  "CONFIG_NETFILTER_XT_TARGET_TTL=y",
-                  "CONFIG_IP6_NF_TARGET_HL=y",
-                  "CONFIG_NETFILTER_XT_MATCH_TTL=y",
-              ]
-
-          if gps == "true":
-              # CONFIG_QCOM_GENI_SE intentionally excluded:
-              # marble vendor tree ships its own msm-geni-se.c which covers all geni_se_* symbols.
-              # enabling the upstream qcom-geni-se.c (CONFIG_QCOM_GENI_SE=y) pulls those same
-              # symbols into vmlinux causing modpost "exported twice" across all vendor i2c/spi/i3c/serial modules.
-              cfg += ["CONFIG_GNSS=y","CONFIG_GNSS_SERIAL=y"]
-
-          if dolby == "true":
-              cfg += [
-                  "CONFIG_SND_SOC_COMPRESS=y","CONFIG_SND_COMPRESS_OFFLOAD=y",
-                  "CONFIG_SND_SOC_WCD938X=y","CONFIG_SND_PCM_OSS=y",
-              ]
-
-          susfs_cfg = [
-              "CONFIG_KSU_SUSFS=y","CONFIG_KSU_SUSFS_SUS_PATH=y",
-              "CONFIG_KSU_SUSFS_SUS_MOUNT=y","CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y",
-              "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y","CONFIG_KSU_SUSFS_SUS_KSTAT=y",
-              "CONFIG_KSU_SUSFS_TRY_UMOUNT=y","CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y",
-              "CONFIG_KSU_SUSFS_SPOOF_UNAME=y","CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y",
-              "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y",
-              "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y","CONFIG_KSU_SUSFS_SUS_SU=n",
-          ]
-
-          with open(defconfig,"a",encoding="utf-8") as f:
-              f.write("\n# === MARBLE FULL POWER ===\n")
-              for c in cfg: f.write(c+"\n")
-              if susfs_ok == "true":
-                  f.write("\n# === SuSFS ===\n")
-                  for c in susfs_cfg: f.write(c+"\n")
-                  f.write("CONFIG_KSU_SUSFS_ENABLE_LOG=n\n" if sec_level=="maximum_stealth"
-                          else "CONFIG_KSU_SUSFS_ENABLE_LOG=y\n")
-              else:
-                  f.write("CONFIG_KSU_SUSFS=n\n")
-          print(f">>> {len(cfg)} configs written to defconfig")
-          PYEOF
-
-          echo ">>> Semua script patch berhasil ditulis ke /tmp/"
-
-      - name: Run Bersihkan Extern
-        run: |
-          cd kernel
-          python3 /tmp/clean_externs.py || true
-          git add -A && git commit -m "clean-externs-surgical" || true
-
-      - name: Run Integrity Bypass Patches
-        if: ${{ github.event.inputs.enable_integrity_bypass == 'true' }}
-        run: |
-          cd kernel
-          python3 /tmp/patch_integrity.py "${{ github.event.inputs.enable_integrity_bypass }}"
-          git add -A && git commit -m "integrity-bypass" || true
-
-      - name: Run TCP BBR2
-        run: |
-          cd kernel
-          python3 /tmp/patch_bbr2.py "${{ github.event.inputs.tcp_profile }}"
-          git add -A && git commit -m "tcp-bbr2" || true
-
-      - name: Patch CPU Performance & Stability
-        run: |
-          cd kernel
-          if [ -f "kernel/sched/cpufreq_schedutil.c" ]; then
-            python3 - kernel/sched/cpufreq_schedutil.c << 'PYEOF'
-          import re, sys
-          path = sys.argv[1]
-          with open(path, encoding="utf-8", errors="replace") as f:
-              src = f.read()
-          src = re.sub(r'(\.up_rate_limit_us\s*=\s*USEC_PER_MSEC\s*\*\s*)\d+', r'\g<1>1', src)
-          src = re.sub(r'(\.down_rate_limit_us\s*=\s*USEC_PER_MSEC\s*\*\s*)\d+', r'\g<1>2', src)
-          src = re.sub(r'(?<!ATTR)(up_rate_limit_us\s*=\s*)(\d+)(\s*;)', r'\g<1>500\g<3>', src)
-          src = re.sub(r'(?<!ATTR)(down_rate_limit_us\s*=\s*)(\d+)(\s*;)', r'\g<1>2000\g<3>', src)
-          with open(path, "w", encoding="utf-8") as f:
-              f.write(src)
-          print(">>> schedutil: rate limits tuned safely")
-          PYEOF
-          fi
-          if [ -f "kernel/sched/fair.c" ]; then
-            python3 - kernel/sched/fair.c << 'PYEOF'
-          import re, sys
-          path = sys.argv[1]
-          with open(path, encoding="utf-8", errors="replace") as f:
-              src = f.read()
-          src = re.sub(r'(sched_latency_ns\s*=\s*)6000000ULL', r'\g<1>4000000ULL', src)
-          with open(path, "w", encoding="utf-8") as f:
-              f.write(src)
-          print(">>> fair.c: sched_latency_ns tuned")
-          PYEOF
-          fi
-          if [ -f "mm/vmscan.c" ]; then
-            python3 - mm/vmscan.c << 'PYEOF'
-          import re, sys
-          path = sys.argv[1]
-          with open(path, encoding="utf-8", errors="replace") as f:
-              src = f.read()
-          src = re.sub(r'(vm_swappiness\s*=\s*)60(\s*[;,])', r'\g<1>100\g<2>', src)
-          with open(path, "w", encoding="utf-8") as f:
-              f.write(src)
-          print(">>> vmscan.c: swappiness tuned to 100")
-          PYEOF
-          fi
-          if [ -f "block/mq-deadline.c" ]; then
-            python3 - block/mq-deadline.c << 'PYEOF'
-          import re, sys
-          path = sys.argv[1]
-          with open(path, encoding="utf-8", errors="replace") as f:
-              src = f.read()
-          src = re.sub(r'(dd->fifo_batch\s*=\s*)\d+(\s*[;,])', r'\g<1>8\g<2>', src)
-          with open(path, "w", encoding="utf-8") as f:
-              f.write(src)
-          print(">>> mq-deadline.c: fifo_batch tuned")
-          PYEOF
-          fi
-          git add -A && git commit -m "perf-tuning" || true
-
-      - name: Patch GPS Signal Dolby
-        run: |
-          cd kernel
-          for f in drivers/tty/serial/msm_geni_serial.c drivers/tty/serial/qcom_geni_serial.c \
-                   drivers/gnss/gnss_serial.c; do
-            [ -f "$f" ] || continue
-            python3 - "$f" << 'PYEOF'
-          import re, sys
-          path = sys.argv[1]
-          with open(path, encoding="utf-8", errors="replace") as f:
-              src = f.read()
-          def safe_timeout(m):
-              val = int(m.group(1))
-              return f"msecs_to_jiffies(500)" if val < 200 else m.group(0)
-          src = re.sub(r'msecs_to_jiffies\((\d+)\)', safe_timeout, src)
-          with open(path, "w", encoding="utf-8") as f:
-              f.write(src)
-          print(f">>> {path}: GPS timeout patched")
-          PYEOF
+          hardening_symbols=(CFI_CLANG CFI_PERMISSIVE SHADOW_CALL_STACK MODVERSIONS MODULE_SIG MODULE_SIG_FORCE SECURITY_SELINUX SECURITY_SELINUX_DEVELOP SECURITY_SELINUX_BOOTPARAM SECURITY_SELINUX_DISABLE STACKPROTECTOR_STRONG STRICT_KERNEL_RWX STRICT_MODULE_RWX RANDOMIZE_BASE HARDENED_USERCOPY FORTIFY_SOURCE INIT_STACK_ALL_ZERO INIT_ON_ALLOC_DEFAULT_ON ARM64_PAN ARM64_SW_TTBR0_PAN ARM64_PTR_AUTH ARM64_BTI_KERNEL UNMAP_KERNEL_AT_EL0 BPF_JIT_ALWAYS_ON SLAB_FREELIST_RANDOM SLAB_FREELIST_HARDENED BUG_ON_DATA_CORRUPTION DEBUG_FS DEVMEM DEVKMEM KEXEC PAGE_OWNER PAGE_PINNER)
+          changed=()
+          for symbol in "${hardening_symbols[@]}"; do
+            [[ "$(config_state "$STOCK_CONFIG" "$symbol")" == "$(config_state "$OUT_DIR/.config" "$symbol")" ]] || changed+=("$symbol")
           done
-          for f in sound/soc/qcom/qdsp6/q6asm.c sound/soc/qcom/qdsp6/q6afe.c; do
-            [ -f "$f" ] || continue
-            python3 - "$f" << 'PYEOF'
-          import re, sys
-          path = sys.argv[1]
-          with open(path, encoding="utf-8", errors="replace") as f:
-              src = f.read()
-          src = re.sub(
-              r'(#define\s+\w*TIMEOUT\w*\s+)(\d+)',
-              lambda m: m.group(1) + "5000" if int(m.group(2)) < 5000 else m.group(0),
-              src
-          )
-          with open(path, "w", encoding="utf-8") as f:
-              f.write(src)
-          print(f">>> {path}: audio timeout patched")
-          PYEOF
-          done
-          for f in drivers/net/wireless/ath/ath11k/mac.c \
-                   drivers/net/wireless/ath/ath10k/mac.c; do
-            [ -f "$f" ] || continue
-            python3 - "$f" << 'PYEOF'
-          import re, sys
-          path = sys.argv[1]
-          with open(path, encoding="utf-8", errors="replace") as f:
-              src = f.read()
-          src = re.sub(r'(#define\s+ATH_MAX_POWER_LEVEL\s+)\d+', r'\g<1>60', src)
-          with open(path, "w", encoding="utf-8") as f:
-              f.write(src)
-          print(f">>> {path}: TX power patched")
-          PYEOF
-          done
-          git add -A && git commit -m "gps-signal-dolby" || true
+          (( ${#changed[@]} == 0 )) || fail "Hardening options differ from the stock config: ${changed[*]}"
+          ! grep -qx 'CONFIG_KSU_DEBUG=y' "$OUT_DIR/.config" || fail "CONFIG_KSU_DEBUG must stay disabled"
 
-      - name: Fix Duplicate Symbol Exports
-        run: |
-          cd kernel
-          python3 - << 'PYEOF'
-          import os, re
-
-          # Simbol yang sudah masuk vmlinux via built-in driver,
-          # harus dihapus dari vendor module agar modpost tidak protes "exported twice"
-          # Root cause fixed: CONFIG_QCOM_GENI_SE=y removed from defconfig.
-          # Upstream qcom-geni-se no longer built into vmlinux, so vendor
-          # msm-geni-se.c can export all geni_se_* symbols freely.
-          # List kept empty as safety net — add symbols here only if a NEW
-          # upstream driver conflict surfaces from a different subsystem.
-          DUPE_SYMS = []
-
-          patched = []
-          for root, dirs, files in os.walk("."):
-              dirs[:] = [d for d in dirs if d not in [".git", "out"]]
-              rel = os.path.relpath(root, ".")
-              # hanya sentuh tree vendor/techpack/platform-msm, bukan upstream driver
-              if not any(x in rel for x in ["techpack", "drivers/platform/msm", "vendor/qcom"]):
-                  continue
-              for fname in files:
-                  if not fname.endswith(".c"):
-                      continue
-                  fp = os.path.join(root, fname)
-                  try:
-                      src = open(fp, encoding="utf-8", errors="replace").read()
-                  except Exception:
-                      continue
-                  changed = False
-                  for sym in DUPE_SYMS:
-                      pat = r'\nEXPORT_SYMBOL(?:_GPL)?\s*\(\s*' + re.escape(sym) + r'\s*\)\s*;'
-                      if re.search(pat, src):
-                          src = re.sub(pat, "", src)
-                          changed = True
-                          print(f">>> Removed EXPORT_SYMBOL({sym}) from {fp}")
-                  if changed:
-                      open(fp, "w", encoding="utf-8").write(src)
-                      patched.append(fp)
-
-          if patched:
-              print(f">>> Total patched: {len(patched)} files")
-          else:
-              print(">>> No duplicate exports found (clean build)")
-          PYEOF
-          git add -A && git commit -m "fix-duplicate-exports" || true
-
-      - name: Konfigurasi Defconfig
-        run: |
-          cd kernel
-          if   [ -f "arch/arm64/configs/marble_defconfig" ]; then
-            DC="marble_defconfig"; DF="arch/arm64/configs/marble_defconfig"
-          elif [ -f "arch/arm64/configs/vendor/marble_defconfig" ]; then
-            DC="vendor/marble_defconfig"; DF="arch/arm64/configs/vendor/marble_defconfig"
-          else
-            DC="gki_defconfig"; DF="arch/arm64/configs/gki_defconfig"
+          module_drift=$(diff <(grep '=m$' "$STOCK_CONFIG" | sort) <(grep '=m$' "$OUT_DIR/.config" | sort) | grep '^[<>]' || true)
+          if [[ -n "$module_drift" ]]; then
+            echo "$module_drift"
+            fail "Module set differs from the stock config; the ROM modules would no longer match this Image"
           fi
-          echo "TARGET_DEFCONFIG=$DC" >> $GITHUB_ENV
-          python3 /tmp/gen_defconfig.py "$DF" \
-            "${{ env.SUSFS_APPLIED }}" \
-            "${{ github.event.inputs.security_level }}" \
-            "${{ github.event.inputs.tcp_profile }}" \
-            "${{ github.event.inputs.cpu_governor }}" \
-            "${{ github.event.inputs.enable_lto }}" \
-            "${{ github.event.inputs.enable_full_security }}" \
-            "${{ github.event.inputs.enable_integrity_bypass }}" \
-            "${{ github.event.inputs.enable_dolby }}" \
-            "${{ github.event.inputs.enable_gps_fix }}" \
-            "${{ github.event.inputs.enable_ttl_bypass }}"
-          git add -A && git commit -m "defconfig-full-power" || true
 
-      - name: Kompilasi Kernel
-        run: |
-          cd kernel
-          export KBUILD_BUILD_USER="marble-fullpower"
-          export KBUILD_BUILD_HOST="kanha-builder"
-          export CCACHE_DIR="$HOME/.ccache"
-          export USE_CCACHE=1
-          ccache -M 8G
-          CFLAGS="-Wno-error -Wno-implicit-function-declaration -Wno-unused-function"
-          CFLAGS="$CFLAGS -Wno-strict-prototypes -Wno-out-of-line-declaration"
-          CFLAGS="$CFLAGS -Wno-incompatible-pointer-types -O3 -pipe"
-          CFLAGS="$CFLAGS -mcpu=cortex-a710 -mtune=cortex-a710 -fstack-protector-strong"
-          LDFLAGS="-fuse-ld=lld"
-          [ "${{ github.event.inputs.enable_lto }}" = "true" ] && {
-            CFLAGS="$CFLAGS -flto=thin"; LDFLAGS="$LDFLAGS -flto=thin"
-          }
-          make O=out ARCH=arm64 CC="ccache clang" LLVM=1 LLVM_IAS=1 "${{ env.TARGET_DEFCONFIG }}"
-          [ -f "arch/arm64/configs/vendor/marble_GKI.config" ] && \
-            [ "${{ env.TARGET_DEFCONFIG }}" = "gki_defconfig" ] && \
-            ./scripts/kconfig/merge_config.sh -m -O out out/.config \
-              arch/arm64/configs/vendor/marble_GKI.config || true
-          ./scripts/config --file out/.config \
-            -d WERROR -d CONFIG_WERROR -d KSU_SUSFS_SUS_SU \
-            -d LOCALVERSION_AUTO --set-val FRAME_WARN 4096
-          make O=out ARCH=arm64 CC="ccache clang" LLVM=1 LLVM_IAS=1 olddefconfig
-          set +e
-          make -j$(nproc --all) O=out ARCH=arm64 \
-            CC="ccache clang" LLVM=1 LLVM_IAS=1 \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
-            KCFLAGS="$CFLAGS" LDFLAGS="$LDFLAGS" \
-            Image Image.gz modules 2>&1 | tee build.log
-          S=${PIPESTATUS[0]}; set -e
-          [ $S -ne 0 ] && { grep -E "error:|fatal error:" build.log | tail -50; exit $S; }
-          ccache -s; echo ">>> BUILD OK"
+          expected_symbols=$(tr -s ' ' '|' <<< "$ENABLED_FEATURES $DISABLED_SYMBOLS KSU_DEBUG LSM LTO_CLANG LTO_NONE LTO_CLANG_THIN LTO_CLANG_FULL THINLTO")
+          drift=$(diff <(grep -E '^(# )?CONFIG_' "$STOCK_CONFIG" | sort) <(grep -E '^(# )?CONFIG_' "$OUT_DIR/.config" | sort) | grep '^[<>]' | grep -vE "CONFIG_($expected_symbols)[ =]" | grep -v '^> # CONFIG_' || true)
+          {
+            echo "### Config drift outside the requested features"
+            echo '```'
+            echo "${drift:-none}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Package AnyKernel3
+      - name: Build Image
         run: |
-          git clone --depth=1 "${{ env.AK3_REPO }}" AnyKernel3
-          cd AnyKernel3
-          rm -rf .git README.md modules patch ramdisk
-          cat > anykernel.sh << 'AKEOF'
-          # AnyKernel3 - Marble Full Power
+          source "$BUILD_LIB"
+
+          kernel_make -j"$(nproc)" Image
+
+      - name: Package AnyKernel3 zip
+        run: |
+          source "$BUILD_LIB"
+
+          image="$OUT_DIR/arch/arm64/boot/Image"
+          KERNEL_RELEASE=$(kernel_make -s kernelrelease | tail -n 1)
+          package_name="AK3_marble_evox_${KERNEL_RELEASE}_ksun-${KSU_COMMIT::7}_susfs-${SUSFS_VERSION}_r${GITHUB_RUN_NUMBER}"
+
+          cp "$image" "$ANYKERNEL_DIR/Image"
+          cat > "$ANYKERNEL_DIR/anykernel.sh" <<EOF
           properties() { '
-          kernel.string=Marble FullPower BakaSU - kanha
-          do.devicecheck=0
-          do.modules=1
-          do.systemless=1
+          kernel.string=$KERNEL_RELEASE | KernelSU-Next + SUSFS $SUSFS_VERSION + Baseband Guard
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=0
           do.cleanup=1
           do.cleanuponabort=0
           device.name1=marble
           device.name2=marblein
+          supported.versions=
+          supported.patchlevels=
+          supported.vendorpatchlevels=
           '; }
-          BLOCK=boot; IS_SLOT_DEVICE=1; RAMDISK_COMPRESSION=auto; PATCH_VBMETA_FLAG=auto;
-          block=boot; is_slot_device=1; ramdisk_compression=auto; patch_vbmeta_flag=auto;
-          . tools/ak3-core.sh; split_boot; flash_boot;
-          AKEOF
 
-          cat > marble_tune.sh << 'TUNEEOF'
-          #!/system/bin/sh
-          # Marble FullPower - post-boot tuning
-          while [ "$(getprop sys.boot_completed)" != "1" ]; do sleep 2; done
-          sleep 3
+          BLOCK=boot;
+          IS_SLOT_DEVICE=auto;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
 
-          # === Integrity Spoof via resetprop ===
-          resetprop -n ro.boot.verifiedbootstate green
-          resetprop -n ro.boot.vbmeta.device_state locked
-          resetprop -n ro.boot.flash.locked 1
-          resetprop -n ro.boot.warranty_bit 0
-          resetprop -n ro.warranty_bit 0
-          resetprop -n ro.debuggable 0
-          resetprop -n ro.secure 1
-          resetprop -n ro.build.type user
-          resetprop -n ro.build.tags release-keys
-          resetprop -n vendor.boot.verifiedbootstate green
+          . tools/ak3-core.sh;
 
-          # === Kernel Security ===
-          echo 1 > /proc/sys/kernel/kptr_restrict
-          echo 1 > /proc/sys/kernel/dmesg_restrict
-          echo 2 > /proc/sys/kernel/randomize_va_space
-          echo 1 > /proc/sys/fs/protected_hardlinks
-          echo 1 > /proc/sys/fs/protected_symlinks
-          echo 0 > /proc/sys/kernel/sysrq
+          split_boot;
+          flash_boot;
+          EOF
 
-          # === Network Security ===
-          echo 1 > /proc/sys/net/ipv4/tcp_syncookies
-          echo 0 > /proc/sys/net/ipv4/tcp_timestamps
-          echo 1 > /proc/sys/net/ipv4/conf/all/rp_filter
-          echo 0 > /proc/sys/net/ipv4/conf/all/accept_redirects
-          echo 0 > /proc/sys/net/ipv4/conf/all/send_redirects
-          echo 1 > /proc/sys/net/ipv4/icmp_echo_ignore_broadcasts
+          mkdir -p "$PACKAGE_DIR"
+          (cd "$ANYKERNEL_DIR" && zip -qr9 "$PACKAGE_DIR/$package_name.zip" . -x '.git/*' '.github/*' README.md '*placeholder')
+          (cd "$PACKAGE_DIR" && sha256sum "$package_name.zip" > "$package_name.zip.sha256")
+          cp "$OUT_DIR/.config" "$PACKAGE_DIR/kernel.config"
 
-          # === BBR TCP Tuning ===
-          echo bbr  > /proc/sys/net/ipv4/tcp_congestion_control
-          echo fq   > /proc/sys/net/core/default_qdisc
-          echo 0    > /proc/sys/net/ipv4/tcp_slow_start_after_idle
-          echo 3    > /proc/sys/net/ipv4/tcp_fastopen
-          echo 2    > /proc/sys/net/core/bpf_jit_harden
-          echo 1    > /proc/sys/net/ipv4/tcp_sack
-          echo 1    > /proc/sys/net/ipv4/tcp_window_scaling
-          echo 1    > /proc/sys/net/ipv4/tcp_low_latency
-          echo 4194304 > /proc/sys/net/core/rmem_max
-          echo 4194304 > /proc/sys/net/core/wmem_max
-          echo "4096 87380 4194304" > /proc/sys/net/ipv4/tcp_rmem
-          echo "4096 65536 4194304" > /proc/sys/net/ipv4/tcp_wmem
+          IMAGE_SHA256=$(sha256sum "$image" | cut -d' ' -f1)
+          PACKAGE_SHA256=$(cut -d' ' -f1 "$PACKAGE_DIR/$package_name.zip.sha256")
+          export KERNEL_RELEASE IMAGE_SHA256 PACKAGE_SHA256
+          jq -n '{
+            kernel: { repository: env.KERNEL_REPO, ref: env.KERNEL_REF, commit: env.KERNEL_COMMIT, release: env.KERNEL_RELEASE, configs: (env.KERNEL_CONFIGS | split(" ")), lto: env.LTO_MODE },
+            kernelsu_next: { repository: env.KSU_REPO, commit: env.KSU_COMMIT },
+            susfs: { repository: env.SUSFS_REPO, branch: env.SUSFS_BRANCH, commit: env.SUSFS_COMMIT, version: env.SUSFS_VERSION },
+            baseband_guard: { repository: env.BBG_REPO, commit: env.BBG_COMMIT },
+            anykernel3: { repository: env.ANYKERNEL_REPO, commit: env.ANYKERNEL_COMMIT },
+            toolchain: { repository: env.CLANG_REPO, commit: env.CLANG_COMMIT, banner: env.CLANG_BANNER },
+            enabled_features: (env.ENABLED_FEATURES | split(" ")),
+            disabled_symbols: (env.DISABLED_SYMBOLS | split(" ")),
+            sha256: { image: env.IMAGE_SHA256, package: env.PACKAGE_SHA256 }
+          }' > "$PACKAGE_DIR/build-info.json"
 
-          # === TTL Manipulation (bypass tethering detection) ===
-          if command -v iptables >/dev/null 2>&1; then
-            iptables  -t mangle -D POSTROUTING -j TTL --ttl-set 65 2>/dev/null || true
-            iptables  -t mangle -A POSTROUTING -j TTL --ttl-set 65 2>/dev/null || true
-          fi
-          if command -v ip6tables >/dev/null 2>&1; then
-            ip6tables -t mangle -D POSTROUTING -j HL  --hl-set  65 2>/dev/null || true
-            ip6tables -t mangle -A POSTROUTING -j HL  --hl-set  65 2>/dev/null || true
-          fi
+          {
+            echo "### $package_name.zip"
+            echo '```json'
+            cat "$PACKAGE_DIR/build-info.json"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "PACKAGE_NAME=$package_name" >> "$GITHUB_ENV"
 
-          # === Signal + Radio Tuning ===
-          resetprop -n persist.vendor.radio.add_power_save 0
-          resetprop -n persist.vendor.radio.apm_sim_not_pwdn 1
-          resetprop -n persist.vendor.radio.sib16_support 1
-          resetprop -n persist.vendor.radio.data_con_rprt 1
-          resetprop -n persist.vendor.radio.force_on_dc 1
-          resetprop -n persist.radio.calls.on.ims true
-          resetprop -n persist.vendor.radio.mt_sms_ack 30
-
-          # === GPS Tuning ===
-          resetprop -n persist.gps.qc_nlp_in_use 1
-          resetprop -n ro.gps.agps_provider 1
-          resetprop -n persist.gps.nmea_prio_fix 1
-          resetprop -n persist.gps.lge_qmi_on true
-
-          # === Audio (Dolby) Tuning ===
-          resetprop -n audio.deep_buffer.media true
-          resetprop -n audio.offload.gapless.enabled true
-          resetprop -n persist.audio.fluence.speaker true
-          resetprop -n persist.vendor.audio.fluence.for.speaker true
-          resetprop -n persist.audio.feature.highqualityaudio true
-
-          # === CPU Governor ===
-          for p in /sys/devices/system/cpu/cpufreq/policy*; do
-            echo schedutil > "$p/scaling_governor" 2>/dev/null || true
-            echo 500  > "$p/schedutil/up_rate_limit_us" 2>/dev/null || true
-            echo 2000 > "$p/schedutil/down_rate_limit_us" 2>/dev/null || true
-          done
-
-          # === Memory Tuning ===
-          echo 100 > /proc/sys/vm/swappiness
-          echo 10  > /proc/sys/vm/dirty_ratio
-          echo 5   > /proc/sys/vm/dirty_background_ratio
-          echo 300 > /proc/sys/vm/dirty_expire_centisecs
-          echo 500 > /proc/sys/vm/dirty_writeback_centisecs
-          echo 1   > /proc/sys/vm/overcommit_memory
-
-          # === ZRAM Activation (75% RAM, lz4) ===
-          if [ -b /dev/block/zram0 ]; then
-            swapoff /dev/block/zram0 2>/dev/null || true
-            echo 1 > /sys/block/zram0/reset 2>/dev/null || true
-            RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
-            ZRAM_SIZE=$((RAM_KB * 1024 * 3 / 4))
-            echo $ZRAM_SIZE > /sys/block/zram0/disksize 2>/dev/null || true
-            echo lz4 > /sys/block/zram0/comp_algorithm 2>/dev/null || true
-            mkswap /dev/block/zram0 2>/dev/null || true
-            swapon /dev/block/zram0 -p 32767 2>/dev/null || true
-          fi
-
-          # === I/O Scheduler ===
-          for q in /sys/block/*/queue; do
-            [ -d "$q" ] || continue
-            echo mq-deadline > "$q/scheduler" 2>/dev/null || true
-            echo 64 > "$q/read_ahead_kb" 2>/dev/null || true
-            echo 0  > "$q/add_random" 2>/dev/null || true
-            echo 2  > "$q/rq_affinity" 2>/dev/null || true
-          done
-
-          setenforce 0 2>/dev/null || true
-          log -t marble-fp "Post-boot tuning done - FULL POWER"
-          TUNEEOF
-          chmod 755 marble_tune.sh
-
-          # === Emergency Backup Script ===
-          cat > marble_emergency.sh << 'EMEOF'
-          #!/system/bin/sh
-          # Marble Emergency Boot Backup/Restore
-          # Usage: marble_emergency.sh backup|restore|list [slot_suffix]
-          CMD="${1:-backup}"
-          SLOT="${2:-$(getprop ro.boot.slot_suffix)}"
-          BOOT_PART=""
-          for p in "/dev/block/bootdevice/by-name/boot${SLOT}" \
-                   /dev/block/platform/*/by-name/boot${SLOT} \
-                   "/dev/block/by-name/boot${SLOT}"; do
-            [ -b "$p" ] && { BOOT_PART="$p"; break; }
-          done
-          [ -z "$BOOT_PART" ] && { echo "ERROR: boot partition not found for slot '${SLOT}'"; exit 1; }
-          BACKUP_DIR="/data/local/marble_backup"
-          mkdir -p "$BACKUP_DIR"
-          BACKUP_FILE="$BACKUP_DIR/boot${SLOT}_$(date +%Y%m%d_%H%M%S).img"
-          LATEST_LINK="$BACKUP_DIR/boot${SLOT}_latest.img"
-          case "$CMD" in
-            backup)
-              echo ">>> Backing up: $BOOT_PART -> $BACKUP_FILE"
-              dd if="$BOOT_PART" of="$BACKUP_FILE" bs=4096 2>&1
-              if [ $? -eq 0 ]; then
-                ln -sf "$BACKUP_FILE" "$LATEST_LINK"
-                echo ">>> Backup OK: $BACKUP_FILE"
-                SIZE=$(du -sh "$BACKUP_FILE" | cut -f1)
-                echo ">>> Size: $SIZE"
-              else
-                echo "ERROR: backup failed"; exit 1
-              fi
-              ;;
-            restore)
-              [ -f "$LATEST_LINK" ] || { echo "ERROR: no backup found at $LATEST_LINK"; exit 1; }
-              REAL=$(readlink -f "$LATEST_LINK")
-              echo ">>> Restoring: $REAL -> $BOOT_PART"
-              dd if="$LATEST_LINK" of="$BOOT_PART" bs=4096 2>&1
-              [ $? -eq 0 ] && echo ">>> Restore OK — reboot to apply" \
-                           || { echo "ERROR: restore failed"; exit 1; }
-              ;;
-            list)
-              echo ">>> Backups in $BACKUP_DIR:"
-              ls -lh "$BACKUP_DIR/" 2>/dev/null || echo "(no backups found)"
-              ;;
-            *)
-              echo "Usage: $0 backup|restore|list [slot_suffix]"
-              echo "       slot_suffix: _a or _b (auto-detected if omitted)"
-              exit 1
-              ;;
-          esac
-          EMEOF
-          chmod 755 marble_emergency.sh
-
-          [ -f "../kernel/out/arch/arm64/boot/Image" ] && cp ../kernel/out/arch/arm64/boot/Image . \
-          || { [ -f "../kernel/out/arch/arm64/boot/Image.gz" ] && cp ../kernel/out/arch/arm64/boot/Image.gz .; } \
-          || { echo "ERROR: no kernel image found"; exit 1; }
-
-          mkdir -p modules/vendor/lib/modules
-          find ../kernel/out -name "*.ko" -exec cp {} modules/vendor/lib/modules/ \; 2>/dev/null || true
-
-          D=$(date +"%Y%m%d-%H%M")
-          ZIP="Marble-FullPower-BakaSU-${D}.zip"
-          zip -r9 "../${ZIP}" * -x "*.git*"
-          echo "ZIP_OUTPUT=${ZIP}" >> $GITHUB_ENV
-
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
+      - name: Upload package
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: Marble-FullPower-BakaSU
-          path: ${{ env.ZIP_OUTPUT }}
-          retention-days: 14
+          name: ${{ env.PACKAGE_NAME }}
+          path: ${{ env.PACKAGE_DIR }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
