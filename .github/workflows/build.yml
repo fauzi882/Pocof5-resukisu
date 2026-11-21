@@ -1,435 +1,445 @@
-#!/usr/bin/env bash
-# ==============================================================================
-#  Melt Kernel build pipeline — Poco F5 / Redmi Note 12 Turbo (marble)
-#  Everything in one file. No side files. No manual steps.
-#
-#  Base    : Pzqqt/android_kernel_xiaomi_marble  (Melt, android12-5.10)
-#  Root    : KernelSU-Next  (legacy / kprobe path)
-#  Hiding  : susfs4ksu kernel patches  (Star-Seven fork)
-#  Features: farian cpufreq governor (generated inline) + BBRv3 + CVE patching
-#
-#  Author  : [K] for Kanha
-# ==============================================================================
-set -Eeuo pipefail
-trap 'echo -e "\n\033[1;31m[FAIL] line $LINENO — $BASH_COMMAND\033[0m" >&2' ERR
-
-# ------------------------------------------------------------------ config ----
-WORKDIR="${WORKDIR:-$PWD}"
-KERNEL_REPO="https://github.com/Pzqqt/android_kernel_xiaomi_marble.git"
-KERNEL_BRANCH_PRIMARY="Melt"
-KERNEL_BRANCH_FALLBACK="android12-5.10"
-KSU_SETUP_URL="https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh"
-SUSFS_REPO="https://github.com/Star-Seven/susfs4ksu.git"
-BBRV3_SRC="https://raw.githubusercontent.com/google/bbr/v3/net/ipv4/tcp_bbr.c"
-CVE_CHECKER_REPO="https://github.com/Divested-Mobile/CVE_Checker.git"
-ANYKERNEL_REPO="https://github.com/osm0sis/AnyKernel3.git"
-ANYKERNEL_BRANCH="master"
-
-ARCH="arm64"
-SUBARCH="arm64"
-CROSS_COMPILE="aarch64-linux-gnu-"
-CC="${CC:-clang}"
-OUT="$WORKDIR/out"
-JOBS="${JOBS:-$(nproc --all)}"
-
-ENABLE_SUSFS=1
-ENABLE_FARIAN=1
-ENABLE_BBRV3=1
-ENABLE_CVE=1
-ENABLE_RESUSFS_MODULE=0
-
-# ------------------------------------------------------------------ helpers ---
-log()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
-warn() { printf '\033[1;33m[WARN] %s\033[0m\n' "$*"; }
-die()  { printf '\033[1;31m[FAIL] %s\033[0m\n' "$*" >&2; exit 1; }
-need() { command -v "$1" >/dev/null 2>&1 || die "missing command: $1"; }
-
-need git
-need make
-need "$CC"
-need bc
-need python3
-need zip
-need curl
-
-mkdir -p "$WORKDIR"
-cd "$WORKDIR"
-
-# ================================================================ 1. KERNEL ==
-log "Kernel source"
-if [ ! -d kernel/.git ]; then
-    if git ls-remote --heads "$KERNEL_REPO" "$KERNEL_BRANCH_PRIMARY" | grep -q .; then
-        git clone --depth=1 -b "$KERNEL_BRANCH_PRIMARY" "$KERNEL_REPO" kernel
-    else
-        warn "branch $KERNEL_BRANCH_PRIMARY not found — falling back"
-        git clone --depth=1 -b "$KERNEL_BRANCH_FALLBACK" "$KERNEL_REPO" kernel
-    fi
-else
-    log "kernel/ already present — reusing"
-fi
-cd kernel
-KERNEL_ROOT="$PWD"
-
-# ============================================================ 2. DEFCONFIG ==
-log "Detecting defconfig"
-DEFCONFIG=""
-for cand in \
-    arch/arm64/configs/vendor/marble_defconfig \
-    arch/arm64/configs/marble_defconfig \
-    arch/arm64/configs/vendor/waipio_defconfig \
-    arch/arm64/configs/waipio_defconfig \
-    arch/arm64/configs/vendor/marble-perf_defconfig
-do
-    if [ -f "$cand" ]; then DEFCONFIG="$cand"; break; fi
-done
-[ -n "$DEFCONFIG" ] || DEFCONFIG="$(find arch/arm64/configs -maxdepth 2 -name '*marble*defconfig' | head -1)"
-[ -n "$DEFCONFIG" ] || die "defconfig for marble not found"
-log "defconfig = $DEFCONFIG"
-
-# ========================================================= 3. KERNELSU-NEXT ==
-log "KernelSU-Next — legacy setup"
-if [ ! -d KernelSU ]; then
-    curl -LSs "$KSU_SETUP_URL" | bash -s legacy
-else
-    log "KernelSU/ exists — skipping setup"
-fi
-
-# ================================================================ 4. SUSFS ==
-if [ "$ENABLE_SUSFS" = "1" ]; then
-    log "SUSFS patches"
-    SUSFS_DIR="$WORKDIR/susfs4ksu"
-    if [ ! -d "$SUSFS_DIR/.git" ]; then
-        git clone --depth=1 "$SUSFS_REPO" "$SUSFS_DIR"
-    fi
-
-    # 4a. KernelSU side
-    KSU_PATCH="$SUSFS_DIR/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
-    if [ -f "$KSU_PATCH" ]; then
-        cp "$KSU_PATCH" KernelSU/
-        ( cd KernelSU && patch -p1 --forward < 10_enable_susfs_for_ksu.patch ) \
-            || warn "KSU susfs patch had rejects — check KernelSU/*.rej"
-    fi
-
-    # 4b. kernel side — prefer 5.10 patch
-    KERN_PATCH="$(find "$SUSFS_DIR/kernel_patches" -maxdepth 1 -name '50_add_susfs_in_kernel-*.patch' \
-                  | grep -E '5[._-]10' | head -1)"
-    [ -n "$KERN_PATCH" ] || KERN_PATCH="$(find "$SUSFS_DIR/kernel_patches" -maxdepth 1 -name '50_add_susfs_in_kernel-*.patch' | sort -V | head -1)"
-    if [ -n "$KERN_PATCH" ]; then
-        cp "$KERN_PATCH" .
-        patch -p1 --forward < "$(basename "$KERN_PATCH")" \
-            || warn "kernel susfs patch had rejects — resolve before re-run"
-    else
-        warn "no 50_add_susfs_in_kernel-*.patch found"
-    fi
-
-    # 4c. overlays
-    cp -v "$SUSFS_DIR"/kernel_patches/fs/* fs/ 2>/dev/null || true
-    cp -v "$SUSFS_DIR"/kernel_patches/include/linux/* include/linux/ 2>/dev/null || true
-fi
-
-# ================================================== 5. FARIAN CPU GOVERNOR ==
-if [ "$ENABLE_FARIAN" = "1" ]; then
-    log "Generating farian governor"
-    cat > drivers/cpufreq/cpufreq_farian.c <<'FARIAN_EOF'
-// SPDX-License-Identifier: GPL-2.0-only
-/*
- * cpufreq_farian.c — "farian" cpufreq governor
- *
- * Minimal, low-latency governor: always requests policy->max while
- * active. Exposes a per-policy sysfs "boost" toggle. Written for Kanha.
- */
-
-#include <linux/cpufreq.h>
-#include <linux/module.h>
-#include <linux/slab.h>
-#include <linux/kobject.h>
-#include <linux/sysfs.h>
-
-struct farian_tunables {
-	unsigned int boost;
-	struct kobject kobj;
-};
-
-static unsigned int farian_get(struct cpufreq_policy *policy,
-			       unsigned int cpu)
-{
-	struct farian_tunables *t = policy->governor_data;
-
-	if (!t)
-		return policy->max;
-
-	if (t->boost)
-		return policy->max;
-
-	return policy->max;
-}
-
-static int farian_init(struct cpufreq_policy *policy)
-{
-	struct farian_tunables *t;
-
-	t = kzalloc(sizeof(*t), GFP_KERNEL);
-	if (!t)
-		return -ENOMEM;
-
-	t->boost = 1;
-	policy->governor_data = t;
-	return 0;
-}
-
-static void farian_exit(struct cpufreq_policy *policy)
-{
-	kfree(policy->governor_data);
-	policy->governor_data = NULL;
-}
-
-static int farian_start(struct cpufreq_policy *policy)
-{
-	return 0;
-}
-
-static void farian_stop(struct cpufreq_policy *policy)
-{
-}
-
-static void farian_limits(struct cpufreq_policy *policy)
-{
-	cpufreq_policy_apply_limits(policy);
-}
-
-static ssize_t boost_show(struct kobject *kobj,
-			  struct kobj_attribute *attr, char *buf)
-{
-	struct farian_tunables *t = container_of(kobj, struct farian_tunables, kobj);
-
-	return sprintf(buf, "%u\n", t->boost);
-}
-
-static ssize_t boost_store(struct kobject *kobj,
-			   struct kobj_attribute *attr,
-			   const char *buf, size_t count)
-{
-	struct farian_tunables *t = container_of(kobj, struct farian_tunables, kobj);
-	unsigned int val;
-
-	if (kstrtouint(buf, 0, &val))
-		return -EINVAL;
-
-	t->boost = !!val;
-	return count;
-}
-
-static struct kobj_attribute farian_boost_attr =
-	__ATTR(boost, 0644, boost_show, boost_store);
-
-static struct attribute *farian_attrs[] = {
-	&farian_boost_attr.attr,
-	NULL,
-};
-
-static const struct attribute_group farian_attr_group = {
-	.attrs = farian_attrs,
-};
-
-static struct cpufreq_governor farian_gov = {
-	.name		= "farian",
-	.owner		= THIS_MODULE,
-	.init		= farian_init,
-	.exit		= farian_exit,
-	.start		= farian_start,
-	.stop		= farian_stop,
-	.limits		= farian_limits,
-	.get		= farian_get,
-};
-
-static int __init farian_gov_init(void)
-{
-	return cpufreq_register_governor(&farian_gov);
-}
-
-static void __exit farian_gov_exit(void)
-{
-	cpufreq_unregister_governor(&farian_gov);
-}
-
-module_init(farian_gov_init);
-module_exit(farian_gov_exit);
-
-MODULE_AUTHOR("Kanha <[K]>");
-MODULE_DESCRIPTION("farian cpufreq governor — Melt marble");
-MODULE_LICENSE("GPL v2");
-FARIAN_EOF
-
-    # Kconfig entry
-    if ! grep -q 'CPU_FREQ_GOV_FARIAN' drivers/cpufreq/Kconfig; then
-        cat >> drivers/cpufreq/Kconfig <<'KCONFIG_EOF'
-
-config CPU_FREQ_GOV_FARIAN
-	tristate "'farian' cpufreq governor"
-	depends on CPU_FREQ
-	help
-	  'farian' — a simple, low-latency governor that pins to policy->max.
-	  Built for Kanha.
-KCONFIG_EOF
-    fi
-
-    # Makefile entry
-    if ! grep -q 'cpufreq_farian.o' drivers/cpufreq/Makefile; then
-        echo 'obj-$(CONFIG_CPU_FREQ_GOV_FARIAN)	+= cpufreq_farian.o' >> drivers/cpufreq/Makefile
-    fi
-
-    # register the sysfs group per-policy via start/stop hooks
-    python3 - <<'PY_EOF'
-import re, pathlib
-p = pathlib.Path("drivers/cpufreq/cpufreq_farian.c")
-src = p.read_text()
-src = src.replace(
-'''static int farian_start(struct cpufreq_policy *policy)
-{
-	return 0;
-}
-
-static void farian_stop(struct cpufreq_policy *policy)
-{
-}
-''',
-'''static int farian_start(struct cpufreq_policy *policy)
-{
-	struct farian_tunables *t = policy->governor_data;
-	int ret;
-
-	if (!t)
-		return 0;
-
-	ret = sysfs_create_group(&policy->kobj, &farian_attr_group);
-	if (ret)
-		return ret;
-	return 0;
-}
-
-static void farian_stop(struct cpufreq_policy *policy)
-{
-	struct farian_tunables *t = policy->governor_data;
-
-	if (!t)
-		return;
-
-	sysfs_remove_group(&policy->kobj, &farian_attr_group);
-}
-''')
-p.write_text(src)
-PY_EOF
-fi
-
-# ================================================================== 6. BBRv3 =
-if [ "$ENABLE_BBRV3" = "1" ]; then
-    log "BBRv3 — replacing net/ipv4/tcp_bbr.c"
-    cp net/ipv4/tcp_bbr.c "$WORKDIR/tcp_bbr.c.orig"
-    if curl -fLSs "$BBRV3_SRC" -o net/ipv4/tcp_bbr.c; then
-        log "BBRv3 source downloaded"
-    else
-        warn "BBRv3 download failed — restoring original"
-        mv "$WORKDIR/tcp_bbr.c.orig" net/ipv4/tcp_bbr.c
-    fi
-
-    if ! grep -q 'config TCP_CONG_BBR' net/ipv4/Kconfig; then
-        cat >> net/ipv4/Kconfig <<'KCONFIG_EOF'
-
-config TCP_CONG_BBR
-	tristate "BBR TCP"
-	default m
-	help
-	  BBR congestion control (v3 source). Kanha's default.
-KCONFIG_EOF
-    fi
-    if ! grep -q 'tcp_bbr.o' net/ipv4/Makefile; then
-        echo 'obj-$(CONFIG_TCP_CONG_BBR) += tcp_bbr.o' >> net/ipv4/Makefile
-    fi
-fi
-
-# ================================================================ 7. CVE =====
-if [ "$ENABLE_CVE" = "1" ]; then
-    log "DivestOS CVE patcher"
-    CVE_DIR="$WORKDIR/CVE_Checker"
-    if [ ! -d "$CVE_DIR/.git" ]; then
-        git clone --depth=1 "$CVE_CHECKER_REPO" "$CVE_DIR" || warn "CVE_Checker clone failed"
-    fi
-    if [ -x "$CVE_DIR/CIP.sh" ]; then
-        ( cd "$CVE_DIR" && DOS_PATCHER_INCLUSIVE_KERNEL="$KERNEL_ROOT" ./CIP.sh "$KERNEL_ROOT" ) \
-            || warn "CIP.sh reported issues — review rejects in kernel tree"
-    else
-        warn "CIP.sh not found — skipping CVE import"
-    fi
-fi
-
-# ============================================================== 8. DEFCONFIG =
-log "Appending build config to $DEFCONFIG"
-cat >> "$DEFCONFIG" <<'DEFCONFIG_EOF'
-
-# ===== [K] / Kanha build overlay =====
-CONFIG_KSU=y
-CONFIG_KPROBES=y
-CONFIG_KPROBE_EVENTS=y
-CONFIG_KSU_KPROBE_HOOKS=y
-# CONFIG_KSU_MANUAL_HOOK is not set
-
-CONFIG_KSU_SUSFS=y
-CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
-CONFIG_KSU_SUSFS_SUS_SU=n
-
-CONFIG_CPU_FREQ_GOV_FARIAN=y
-CONFIG_TCP_CONG_BBR=y
-CONFIG_TCP_CONG_CUBIC=y
-CONFIG_TCP_CONG_WESTWOOD=y
-CONFIG_TCP_CONG_HTCP=y
-CONFIG_DEFAULT_TCP_CONG="bbr"
-DEFCONFIG_EOF
-
-# ================================================================ 9. BUILD ===
-log "Building"
-export ARCH SUBARCH CROSS_COMPILE CC
-export LLVM=1
-export LLVM_IAS=1
-mkdir -p "$OUT"
-
-make O="$OUT" "$(basename "$DEFCONFIG")"
-make O="$OUT" -j"$JOBS" 2>&1 | tee "$OUT/build.log"
-
-IMG="$OUT/arch/arm64/boot/Image"
-[ -f "$IMG" ] || IMG="$OUT/arch/arm64/boot/Image.gz"
-[ -f "$IMG" ] || die "kernel Image not produced — inspect $OUT/build.log"
-
-# =========================================================== 10. ANYKERNEL ===
-log "Packaging AnyKernel3"
-AK3="$WORKDIR/AnyKernel3"
-if [ ! -d "$AK3/.git" ]; then
-    git clone --depth=1 -b "$ANYKERNEL_BRANCH" "$ANYKERNEL_REPO" "$AK3"
-fi
-cp "$IMG" "$AK3/Image"
-
-if [ -d "$OUT/arch/arm64/boot/dts/vendor/qcom" ]; then
-    find "$OUT/arch/arm64/boot/dts/vendor/qcom" -name '*.dtb' -exec cp {} "$AK3/" \; 2>/dev/null || true
-fi
-if [ -f "$OUT/arch/arm64/boot/dtbo.img" ]; then cp "$OUT/arch/arm64/boot/dtbo.img" "$AK3/"; fi
-
-ZIP_NAME="Melt-marble-ksun-susfs-farian-bbrv3-$(date +%Y%m%d-%H%M).zip"
-( cd "$AK3" && zip -r9 "$WORKDIR/$ZIP_NAME" . -x '.git/*' )
-
-# ==================================================== 11. ReSuSFS (optional) ==
-if [ "$ENABLE_RESUSFS_MODULE" = "1" ]; then
-    log "Fetching latest ReSuSFS release"
-    URL="$(curl -s https://api.github.com/repos/ahmed-alnassif/ReSuSFS/releases/latest \
-           | grep -o 'https://[^"]*\.zip' | head -1)"
-    if [ -n "$URL" ]; then
-        curl -L -o "$WORKDIR/ReSuSFS-latest.zip" "$URL"
-        log "ReSuSFS saved to $WORKDIR/ReSuSFS-latest.zip"
-    else
-        warn "could not resolve ReSuSFS release asset"
-    fi
-fi
-
-# ================================================================ 12. DONE ===
-log "DONE — Kanha's build is ready"
-echo "  Kernel zip : $WORKDIR/$ZIP_NAME"
-echo "  Build log  : $OUT/build.log"
-echo "  Rejects    : $(find . -name '*.rej' | wc -l) file(s)"
+name: Build Marble Kernel
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf imagemagick lib32ncurses5-dev lib32readline-dev lib32z1-dev libelf-dev liblz4-tool libncurses5 libncurses5-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 device-tree-compiler gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
+
+      - name: Build Pipeline
+        run: |
+          set -Eeuo pipefail
+          trap 'echo -e "\n\033[1;31m[FAIL] line $LINENO — $BASH_COMMAND\033[0m" >&2' ERR
+
+          WORKDIR="$PWD"
+          KERNEL_REPO="https://github.com/Pzqqt/android_kernel_xiaomi_marble.git"
+          KERNEL_BRANCH_PRIMARY="Melt"
+          KERNEL_BRANCH_FALLBACK="android12-5.10"
+          KSU_SETUP_URL="https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh"
+          SUSFS_REPO="https://github.com/Star-Seven/susfs4ksu.git"
+          BBRV3_SRC="https://raw.githubusercontent.com/google/bbr/v3/net/ipv4/tcp_bbr.c"
+          CVE_CHECKER_REPO="https://github.com/Divested-Mobile/CVE_Checker.git"
+          ANYKERNEL_REPO="https://github.com/osm0sis/AnyKernel3.git"
+          ANYKERNEL_BRANCH="master"
+
+          ARCH="arm64"
+          SUBARCH="arm64"
+          CROSS_COMPILE="aarch64-linux-gnu-"
+          CC="${CC:-clang}"
+          OUT="$WORKDIR/out"
+          JOBS="${JOBS:-$(nproc --all)}"
+
+          ENABLE_SUSFS=1
+          ENABLE_FARIAN=1
+          ENABLE_BBRV3=1
+          ENABLE_CVE=1
+          ENABLE_RESUSFS_MODULE=0
+
+          # ------------------------------------------------------------------ helpers ---
+          log()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
+          warn() { printf '\033[1;33m[WARN] %s\033[0m\n' "$*"; }
+          die()  { printf '\033[1;31m[FAIL] %s\033[0m\n' "$*" >&2; exit 1; }
+          need() { command -v "$1" >/dev/null 2>&1 || die "missing command: $1"; }
+
+          need git
+          need make
+          need "$CC"
+          need bc
+          need python3
+          need zip
+          need curl
+
+          mkdir -p "$WORKDIR"
+          cd "$WORKDIR"
+
+          # ================================================================ 1. KERNEL ==
+          log "Kernel source"
+          if [ ! -d kernel/.git ]; then
+              if git ls-remote --heads "$KERNEL_REPO" "$KERNEL_BRANCH_PRIMARY" | grep -q .; then
+                  git clone --depth=1 -b "$KERNEL_BRANCH_PRIMARY" "$KERNEL_REPO" kernel
+              else
+                  warn "branch $KERNEL_BRANCH_PRIMARY not found — falling back"
+                  git clone --depth=1 -b "$KERNEL_BRANCH_FALLBACK" "$KERNEL_REPO" kernel
+              fi
+          else
+              log "kernel/ already present — reusing"
+          fi
+          cd kernel
+          KERNEL_ROOT="$PWD"
+
+          # ============================================================ 2. DEFCONFIG ==
+          log "Detecting defconfig"
+          DEFCONFIG=""
+          for cand in \
+              arch/arm64/configs/vendor/marble_defconfig \
+              arch/arm64/configs/marble_defconfig \
+              arch/arm64/configs/vendor/waipio_defconfig \
+              arch/arm64/configs/waipio_defconfig \
+              arch/arm64/configs/vendor/marble-perf_defconfig
+          do
+              if [ -f "$cand" ]; then DEFCONFIG="$cand"; break; fi
+          done
+          [ -n "$DEFCONFIG" ] || DEFCONFIG="$(find arch/arm64/configs -maxdepth 2 -name '*marble*defconfig' | head -1)"
+          [ -n "$DEFCONFIG" ] || die "defconfig for marble not found"
+          log "defconfig = $DEFCONFIG"
+
+          # ========================================================= 3. KERNELSU-NEXT ==
+          log "KernelSU-Next — legacy setup"
+          if [ ! -d KernelSU ]; then
+              curl -LSs "$KSU_SETUP_URL" | bash -s legacy
+          else
+              log "KernelSU/ exists — skipping setup"
+          fi
+
+          # ================================================================ 4. SUSFS ==
+          if [ "$ENABLE_SUSFS" = "1" ]; then
+              log "SUSFS patches"
+              SUSFS_DIR="$WORKDIR/susfs4ksu"
+              if [ ! -d "$SUSFS_DIR/.git" ]; then
+                  git clone --depth=1 "$SUSFS_REPO" "$SUSFS_DIR"
+              fi
+              KSU_PATCH="$SUSFS_DIR/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
+              if [ -f "$KSU_PATCH" ]; then
+                  cp "$KSU_PATCH" KernelSU/
+                  ( cd KernelSU && patch -p1 --forward < 10_enable_susfs_for_ksu.patch ) \
+                      || warn "KSU susfs patch had rejects — check KernelSU/*.rej"
+              fi
+              KERN_PATCH="$(find "$SUSFS_DIR/kernel_patches" -maxdepth 1 -name '50_add_susfs_in_kernel-*.patch' \
+                            | grep -E '5[._-]10' | head -1)"
+              [ -n "$KERN_PATCH" ] || KERN_PATCH="$(find "$SUSFS_DIR/kernel_patches" -maxdepth 1 -name '50_add_susfs_in_kernel-*.patch' | sort -V | head -1)"
+              if [ -n "$KERN_PATCH" ]; then
+                  cp "$KERN_PATCH" .
+                  patch -p1 --forward < "$(basename "$KERN_PATCH")" \
+                      || warn "kernel susfs patch had rejects — resolve before re-run"
+              else
+                  warn "no 50_add_susfs_in_kernel-*.patch found"
+              fi
+              cp -v "$SUSFS_DIR"/kernel_patches/fs/* fs/ 2>/dev/null || true
+              cp -v "$SUSFS_DIR"/kernel_patches/include/linux/* include/linux/ 2>/dev/null || true
+          fi
+
+          # ================================================== 5. FARIAN CPU GOVERNOR ==
+          if [ "$ENABLE_FARIAN" = "1" ]; then
+              log "Generating farian governor"
+              cat > drivers/cpufreq/cpufreq_farian.c <<'FARIAN_EOF'
+          // SPDX-License-Identifier: GPL-2.0-only
+          /*
+           * cpufreq_farian.c — "farian" cpufreq governor
+           *
+           * Minimal, low-latency governor: always requests policy->max while
+           * active. Exposes a per-policy sysfs "boost" toggle. Written for Kanha.
+           */
+
+          #include <linux/cpufreq.h>
+          #include <linux/module.h>
+          #include <linux/slab.h>
+          #include <linux/kobject.h>
+          #include <linux/sysfs.h>
+
+          struct farian_tunables {
+              unsigned int boost;
+              struct kobject kobj;
+          };
+
+          static unsigned int farian_get(struct cpufreq_policy *policy,
+                         unsigned int cpu)
+          {
+              struct farian_tunables *t = policy->governor_data;
+
+              if (!t)
+                  return policy->max;
+
+              if (t->boost)
+                  return policy->max;
+
+              return policy->max;
+          }
+
+          static int farian_init(struct cpufreq_policy *policy)
+          {
+              struct farian_tunables *t;
+
+              t = kzalloc(sizeof(*t), GFP_KERNEL);
+              if (!t)
+                  return -ENOMEM;
+
+              t->boost = 1;
+              policy->governor_data = t;
+              return 0;
+          }
+
+          static void farian_exit(struct cpufreq_policy *policy)
+          {
+              kfree(policy->governor_data);
+              policy->governor_data = NULL;
+          }
+
+          static int farian_start(struct cpufreq_policy *policy)
+          {
+              return 0;
+          }
+
+          static void farian_stop(struct cpufreq_policy *policy)
+          {
+          }
+
+          static void farian_limits(struct cpufreq_policy *policy)
+          {
+              cpufreq_policy_apply_limits(policy);
+          }
+
+          static ssize_t boost_show(struct kobject *kobj,
+                        struct kobj_attribute *attr, char *buf)
+          {
+              struct farian_tunables *t = container_of(kobj, struct farian_tunables, kobj);
+
+              return sprintf(buf, "%u\n", t->boost);
+          }
+
+          static ssize_t boost_store(struct kobject *kobj,
+                         struct kobj_attribute *attr,
+                         const char *buf, size_t count)
+          {
+              struct farian_tunables *t = container_of(kobj, struct farian_tunables, kobj);
+              unsigned int val;
+
+              if (kstrtouint(buf, 0, &val))
+                  return -EINVAL;
+
+              t->boost = !!val;
+              return count;
+          }
+
+          static struct kobj_attribute farian_boost_attr =
+              __ATTR(boost, 0644, boost_show, boost_store);
+
+          static struct attribute *farian_attrs[] = {
+              &farian_boost_attr.attr,
+              NULL,
+          };
+
+          static const struct attribute_group farian_attr_group = {
+              .attrs = farian_attrs,
+          };
+
+          static struct cpufreq_governor farian_gov = {
+              .name       = "farian",
+              .owner      = THIS_MODULE,
+              .init       = farian_init,
+              .exit       = farian_exit,
+              .start      = farian_start,
+              .stop       = farian_stop,
+              .limits     = farian_limits,
+              .get        = farian_get,
+          };
+
+          static int __init farian_gov_init(void)
+          {
+              return cpufreq_register_governor(&farian_gov);
+          }
+
+          static void __exit farian_gov_exit(void)
+          {
+              cpufreq_unregister_governor(&farian_gov);
+          }
+
+          module_init(farian_gov_init);
+          module_exit(farian_gov_exit);
+
+          MODULE_AUTHOR("Kanha <[K]>");
+          MODULE_DESCRIPTION("farian cpufreq governor — Melt marble");
+          MODULE_LICENSE("GPL v2");
+          FARIAN_EOF
+
+              if ! grep -q 'CPU_FREQ_GOV_FARIAN' drivers/cpufreq/Kconfig; then
+                  cat >> drivers/cpufreq/Kconfig <<'KCONFIG_EOF'
+
+          config CPU_FREQ_GOV_FARIAN
+              tristate "'farian' cpufreq governor"
+              depends on CPU_FREQ
+              help
+                'farian' — a simple, low-latency governor that pins to policy->max.
+                Built for Kanha.
+          KCONFIG_EOF
+              fi
+
+              if ! grep -q 'cpufreq_farian.o' drivers/cpufreq/Makefile; then
+                  echo 'obj-$(CONFIG_CPU_FREQ_GOV_FARIAN)	+= cpufreq_farian.o' >> drivers/cpufreq/Makefile
+              fi
+
+              python3 - <<'PY_EOF'
+          import re, pathlib
+          p = pathlib.Path("drivers/cpufreq/cpufreq_farian.c")
+          src = p.read_text()
+          src = src.replace(
+          '''static int farian_start(struct cpufreq_policy *policy)
+          {
+              return 0;
+          }
+
+          static void farian_stop(struct cpufreq_policy *policy)
+          {
+          }
+          ''',
+          '''static int farian_start(struct cpufreq_policy *policy)
+          {
+              struct farian_tunables *t = policy->governor_data;
+              int ret;
+
+              if (!t)
+                  return 0;
+
+              ret = sysfs_create_group(&policy->kobj, &farian_attr_group);
+              if (ret)
+                  return ret;
+              return 0;
+          }
+
+          static void farian_stop(struct cpufreq_policy *policy)
+          {
+              struct farian_tunables *t = policy->governor_data;
+
+              if (!t)
+                  return;
+
+              sysfs_remove_group(&policy->kobj, &farian_attr_group);
+          }
+          ''')
+          p.write_text(src)
+          PY_EOF
+          fi
+
+          # ================================================================== 6. BBRv3 =
+          if [ "$ENABLE_BBRV3" = "1" ]; then
+              log "BBRv3 — replacing net/ipv4/tcp_bbr.c"
+              cp net/ipv4/tcp_bbr.c "$WORKDIR/tcp_bbr.c.orig"
+              if curl -fLSs "$BBRV3_SRC" -o net/ipv4/tcp_bbr.c; then
+                  log "BBRv3 source downloaded"
+              else
+                  warn "BBRv3 download failed — restoring original"
+                  mv "$WORKDIR/tcp_bbr.c.orig" net/ipv4/tcp_bbr.c
+              fi
+
+              if ! grep -q 'config TCP_CONG_BBR' net/ipv4/Kconfig; then
+                  cat >> net/ipv4/Kconfig <<'KCONFIG_EOF'
+
+          config TCP_CONG_BBR
+              tristate "BBR TCP"
+              default m
+              help
+                BBR congestion control (v3 source). Kanha's default.
+          KCONFIG_EOF
+              fi
+              if ! grep -q 'tcp_bbr.o' net/ipv4/Makefile; then
+                  echo 'obj-$(CONFIG_TCP_CONG_BBR) += tcp_bbr.o' >> net/ipv4/Makefile
+              fi
+          fi
+
+          # ================================================================ 7. CVE =====
+          if [ "$ENABLE_CVE" = "1" ]; then
+              log "DivestOS CVE patcher"
+              CVE_DIR="$WORKDIR/CVE_Checker"
+              if [ ! -d "$CVE_DIR/.git" ]; then
+                  git clone --depth=1 "$CVE_CHECKER_REPO" "$CVE_DIR" || warn "CVE_Checker clone failed"
+              fi
+              if [ -x "$CVE_DIR/CIP.sh" ]; then
+                  ( cd "$CVE_DIR" && DOS_PATCHER_INCLUSIVE_KERNEL="$KERNEL_ROOT" ./CIP.sh "$KERNEL_ROOT" ) \
+                      || warn "CIP.sh reported issues — review rejects in kernel tree"
+              else
+                  warn "CIP.sh not found — skipping CVE import"
+              fi
+          fi
+
+          # ============================================================== 8. DEFCONFIG =
+          log "Appending build config to $DEFCONFIG"
+          cat >> "$DEFCONFIG" <<'DEFCONFIG_EOF'
+
+          # ===== [K] / Kanha build overlay =====
+          CONFIG_KSU=y
+          CONFIG_KPROBES=y
+          CONFIG_KPROBE_EVENTS=y
+          CONFIG_KSU_KPROBE_HOOKS=y
+          # CONFIG_KSU_MANUAL_HOOK is not set
+
+          CONFIG_KSU_SUSFS=y
+          CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
+          CONFIG_KSU_SUSFS_SUS_SU=n
+
+          CONFIG_CPU_FREQ_GOV_FARIAN=y
+          CONFIG_TCP_CONG_BBR=y
+          CONFIG_TCP_CONG_CUBIC=y
+          CONFIG_TCP_CONG_WESTWOOD=y
+          CONFIG_TCP_CONG_HTCP=y
+          CONFIG_DEFAULT_TCP_CONG="bbr"
+          DEFCONFIG_EOF
+
+          # ================================================================ 9. BUILD ===
+          log "Building"
+          export ARCH SUBARCH CROSS_COMPILE CC
+          export LLVM=1
+          export LLVM_IAS=1
+          mkdir -p "$OUT"
+
+          make O="$OUT" "$(basename "$DEFCONFIG")"
+          make O="$OUT" -j"$JOBS" 2>&1 | tee "$OUT/build.log"
+
+          IMG="$OUT/arch/arm64/boot/Image"
+          [ -f "$IMG" ] || IMG="$OUT/arch/arm64/boot/Image.gz"
+          [ -f "$IMG" ] || die "kernel Image not produced — inspect $OUT/build.log"
+
+          # =========================================================== 10. ANYKERNEL ===
+          log "Packaging AnyKernel3"
+          AK3="$WORKDIR/AnyKernel3"
+          if [ ! -d "$AK3/.git" ]; then
+              git clone --depth=1 -b "$ANYKERNEL_BRANCH" "$ANYKERNEL_REPO" "$AK3"
+          fi
+          cp "$IMG" "$AK3/Image"
+
+          if [ -d "$OUT/arch/arm64/boot/dts/vendor/qcom" ]; then
+              find "$OUT/arch/arm64/boot/dts/vendor/qcom" -name '*.dtb' -exec cp {} "$AK3/" \; 2>/dev/null || true
+          fi
+          if [ -f "$OUT/arch/arm64/boot/dtbo.img" ]; then cp "$OUT/arch/arm64/boot/dtbo.img" "$AK3/"; fi
+
+          ZIP_NAME="Melt-marble-ksun-susfs-farian-bbrv3-$(date +%Y%m%d-%H%M).zip"
+          ( cd "$AK3" && zip -r9 "$WORKDIR/$ZIP_NAME" . -x '.git/*' )
+
+          # ==================================================== 11. ReSuSFS (optional) ==
+          if [ "$ENABLE_RESUSFS_MODULE" = "1" ]; then
+              log "Fetching latest ReSuSFS release"
+              URL="$(curl -s https://api.github.com/repos/ahmed-alnassif/ReSuSFS/releases/latest \
+                     | grep -o 'https://[^"]*\.zip' | head -1)"
+              if [ -n "$URL" ]; then
+                  curl -L -o "$WORKDIR/ReSuSFS-latest.zip" "$URL"
+                  log "ReSuSFS saved to $WORKDIR/ReSuSFS-latest.zip"
+              else
+                  warn "could not resolve ReSuSFS release asset"
+              fi
+          fi
+
+          # ================================================================ 12. DONE ===
+          log "DONE — Kanha's build is ready"
+          echo "  Kernel zip : $WORKDIR/$ZIP_NAME"
+          echo "  Build log  : $OUT/build.log"
+          echo "  Rejects    : $(find . -name '*.rej' | wc -l) file(s)"
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kernel-Build
+          path: |
+            Melt-marble-*.zip
+            out/build.log
+          retention-days: 14
